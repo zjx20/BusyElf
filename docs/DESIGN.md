@@ -30,17 +30,17 @@
    │        │ reconcile()                                                      │
    │        ├──▶ SleepGuard   (存在 working 任务 → 持有 1 个 IOPMAssertion)     │
    │        ├──▶ StatusItem   (图标: 数量 / working / 需要关注)                 │
-   │        ├──▶ Popover      (SwiftUI, 仅在打开时渲染)                         │
+   │        ├──▶ Popover      (纯 AppKit, 仅首次打开时懒加载)                   │
    │        └──▶ Notifier     (working→waiting 时发系统横幅)                    │
    └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**关键取舍:纯 AppKit,而非 SwiftUI `MenuBarExtra`。** 因为需要在图标旁画数字徽标、区分左键 popover / 右键菜单、程序化开关 popover——这些 `MenuBarExtra` 都做不到;且 AppKit 内存地板(~13MB RSS)显著低于 SwiftUI(~30–56MB),对省内存硬需求是决定性的。SwiftUI 仅用在 popover 内部(`NSHostingController`)。
+**关键取舍:全程纯 AppKit,完全不链接 SwiftUI。** 因为需要在图标旁画数字徽标、区分左键 popover / 右键菜单、程序化开关 popover——这些 `MenuBarExtra` 都做不到。**popover 内容也用纯 AppKit(`NSViewController` + `NSStackView`/`NSView`)而非 `NSHostingController`**:真机实测发现,只要二进制链接 SwiftUI.framework,dyld 启动即加载并初始化,phys_footprint 就被抬到 ~129MB(落在 SwiftUI 的 30–56MB+ 区间);去掉 SwiftUI 链接后降到 ~12MB。这是"数 MB"硬需求的决定性因素。
 
 - 最低系统:**macOS 14.0**(更好的 SF Symbols 渲染、现代 `SMAppService`)。
 - 分发:**Developer-ID 签名 + 公证,App Store 外分发**(推荐;由于不杀进程,沙盒与否不再被强约束,Developer-ID 最省事)。
 - **不捆绑任何 helper 二进制**:适配器用用户自带的 `jq` + `curl` 在 hook 里完成,BusyElf 只是个被动的 HTTP 服务端。
-- 内存预期:接受 **~13MB RSS** 作为"数 MB"的现实落点(任何带菜单栏 UI 的 AppKit 应用都有此地板,真正单位数 MB 在有 UI 前提下做不到)。
+- 内存实测:idle **phys_footprint ≈ 12MB**(Activity Monitor "内存"口径),达成"数 MB"硬需求。注意 `ps` 的 RSS(~45MB)把全系统共享框架净页也算进来,虚高且不代表本进程真实占用,衡量内存请以 phys_footprint 为准。
 
 ## 3. 核心机制:阻止休眠(SleepGuard)
 
@@ -164,17 +164,17 @@ struct TaskSession: Identifiable {
 |---|---|
 | `App/BusyElfApp.swift` | `@main`:`NSApplication`,`setActivationPolicy(.accessory)`,`app.run()`。无 SwiftUI App/Scene |
 | `App/AppDelegate.swift` | 持有 `NSStatusItem` + `NSPopover` + server 生命周期;连 `TaskStore.onChange → 刷新图标`;左键 popover / 右键菜单 |
-| `App/Info.plist` | `LSUIElement=1`、bundle id、最低 macOS 14.0 |
+| `BusyElf-Info.plist` | `LSUIElement=1`、bundle id、最低 macOS 14.0(由 `project.yml` 经 XcodeGen 生成,gitignore) |
 | `Power/SleepGuard.swift` | 单个引用计数的 `IOPMAssertion`;`setBlocked(Bool)`;可选第二个显示断言 |
 | `State/TaskSession.swift` | `TaskSession` 值类型 + `TaskStatus` + `elapsed/isStuck` 辅助 |
 | `State/TaskStore.swift` | 真相源 `[id: TaskSession]`;串行队列;`start/update/wait/end` 幂等 upsert/remove;`reconcile()` 驱动 SleepGuard + onChange |
 | `Server/LoopbackServer.swift` | `NWListener`(loopback)、accept、手解析 `POST /v1/task/*`、取 body |
 | `Server/TaskEvent.swift` | 中立 body 的 `Codable`(`id/name/tool/detail/message/reply/agent`)+ 容错解析 |
 | `Server/Router.swift` | 路径 → 动词 → 调 `TaskStore` |
-| `UI/StatusItemController.swift` | `refreshIcon(count, hasWaiting)`:bolt 明暗 + 数字 + 关注态着色 |
-| `UI/PopoverRootView.swift` | SwiftUI 根视图:状态头、可滚动任务列表、底部开关 |
-| `UI/AgentRow.swift` | 单任务行:状态点、项目名、任务/活动、时长、`×` 行内确认 |
-| `UI/PopoverViewModel.swift` | `TaskStore` 快照桥接;仅可见时的时长 ticker |
+| `UI/StatusItemController.swift` | `refresh(workingCount:waitingCount:)`:bolt 明暗 + 数字 + 关注态(waiting 用 palette 烤橙 + 橙色数字) |
+| `UI/PopoverController.swift` | 纯 AppKit `NSViewController`:状态头、可滚动任务列表、空态、底部开关;仅可见时的 1s 时长 ticker;⋯ overflow 菜单 |
+| `UI/AgentRowView.swift` | 单任务行 `NSView`:状态点、项目名、任务/活动、时长、`×` 行内确认;按 id 复用 + hover 高亮 |
+| `UI/AppKitHelpers.swift` | popover 公用控件:`DotView`(状态点)、`HoverButton`(hover 变红的 ×)、`HoverRow`/`ClickableRow`(悬停高亮 + 整行可点)、label/symbol/separator 工厂 |
 | `UI/Notifier.swift` | `UNUserNotificationCenter`:working→waiting 时发横幅 |
 | `Login/LoginItem.swift` | `SMAppService.mainApp` 注册/注销;默认关 |
 
@@ -192,7 +192,7 @@ struct TaskSession: Identifiable {
 
 | 主题 | 选择 | 一句话理由 |
 |---|---|---|
-| UI 框架 | 纯 AppKit(SwiftUI 仅在 popover 内) | 需要图标数字徽标/左右键区分/程序化 popover;内存更低 |
+| UI 框架 | 全程纯 AppKit(含 popover,不链接 SwiftUI) | 需要图标数字徽标/左右键区分/程序化 popover;链 SwiftUI 会把 footprint 抬到 ~129MB |
 | 阻止休眠 | `IOPMAssertionCreateWithName(PreventUserIdleSystemSleep)` | == `caffeinate -i`;无子进程、崩溃自动回收、sandbox 安全 |
 | 计数模型 | `id` 字典 + 幂等增删 | 事件会丢/重;整数计数器会永久卡住休眠 |
 | 协议 | agent 中立的 4 动词 HTTP | 不绑 Claude;未来接 Codex 等只需写适配器 |
@@ -201,7 +201,7 @@ struct TaskSession: Identifiable {
 | 崩溃自愈 | 不做自动探测;靠手动移除 | 小概率;换取零后台定时器 |
 | 强制结束 | 仅移除任务,不杀进程 | 用户明确要求;沙盒/分发不再被绑死 |
 | 鉴权 | 无 | 纯本机同用户,刻意从简 |
-| 内存目标 | 接受 ~13MB | 带 UI 的 AppKit 现实地板 |
+| 内存目标 | 实测 phys_footprint ≈ 12MB | 纯 AppKit(不链 SwiftUI)达成"数 MB";以 phys_footprint 而非 RSS 衡量 |
 | 最低系统 | macOS 14.0 | SF Symbols / SMAppService |
 | 分发 | Developer-ID + 公证,App Store 外 | 最省事;无沙盒约束需求 |
 
@@ -209,7 +209,7 @@ struct TaskSession: Identifiable {
 
 - **P0 核心休眠环**:AppKit 外壳 + `LSUIElement` + `SleepGuard` + `TaskStore`(状态机)+ debug 菜单手动增删。用 `pmset -g assertions` 验证 0→1 加断言、1→0 释放。
 - **P1 IPC + 适配器端到端**:`LoopbackServer`(loopback)+ `Router` 路径路由 + `TaskEvent` 容错解析 + Claude `settings.json`(jq 适配器)。真实会话翻转计数并阻止/恢复休眠。**先在真机抓各 hook 真实 payload,锁定 jq 字段。**
-- **P2 动态图标 + popover(只读)**:图标明暗/数字/关注态;SwiftUI popover 列表显示项目/任务/活动/时长。
+- **P2 动态图标 + popover(只读)**:图标明暗/数字/关注态;纯 AppKit popover 列表显示项目/任务/活动/时长。
 - **P3 提醒 + 强制结束**:`wait` 态 UI、working→waiting 系统横幅、`×` 单段确认、Stop all。
 - **P4 打磨发布**:开机启动(`SMAppService` 默认关)、"也保持屏幕唤醒"、空态、`PROTOCOL.md`、Developer-ID 签名 + 公证、内存/CPU 审计。
 
