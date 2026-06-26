@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- teamID 是占位符:CI 在 export 前用 secrets.APPLE_TEAM_ID 经 PlistBuddy 注入(见 release.yml)。
+     本地手动 exportArchive 时,把 YOUR_TEAM_ID 换成自己的 10 位 Team ID。 -->
+<plist version="1.0"><dict>
+  <key>method</key><string>developer-id</string>
+  <key>signingStyle</key><string>manual</string>
+  <key>teamID</key><string>YOUR_TEAM_ID</string>
+</dict></plist>

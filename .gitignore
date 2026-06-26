@@ -1,0 +1,18 @@
+# XcodeGen 生成物(从不手改、从不打开)
+BusyElf.xcodeproj/
+
+# XcodeGen 由 project.yml 生成的 Info.plist / entitlements(单一真相源是 project.yml)
+BusyElf-Info.plist
+BusyElf.entitlements
+
+# 构建产物
+build/
+DerivedData/
+*.xcarchive
+*.zip
+
+# macOS
+.DS_Store
+
+# 调试期抓 hook payload 用
+busyelf-hook-capture.ndjson

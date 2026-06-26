@@ -1,0 +1,46 @@
+name: Release
+on:
+  push: { tags: ["v*"] }
+jobs:
+  release:
+    runs-on: macos-14
+    env:
+      DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with: { xcode-version: "16" }
+      - run: brew install xcodegen
+
+      # 1) 导入 Developer ID 证书到临时 keychain
+      - uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.DEV_ID_P12 }}
+          p12-password:    ${{ secrets.DEV_ID_P12_PASSWORD }}
+
+      # 2) 生成工程 + archive + 导出已签名 .app
+      #    ExportOptions.plist 里的 teamID 是占位符,用 secret 注入真实 Team ID 再导出。
+      - run: |
+          xcodegen generate
+          xcodebuild -project BusyElf.xcodeproj -scheme BusyElf \
+            -configuration Release -archivePath build/BusyElf.xcarchive archive
+          /usr/libexec/PlistBuddy -c "Set :teamID ${{ secrets.APPLE_TEAM_ID }}" ExportOptions.plist
+          xcodebuild -exportArchive -archivePath build/BusyElf.xcarchive \
+            -exportOptionsPlist ExportOptions.plist -exportPath build/export
+
+      # 3) 公证(App Store Connect API key,比 apple-id+专用密码更稳)
+      - run: |
+          cd build/export
+          ditto -c -k --keepParent BusyElf.app BusyElf.zip
+          echo "${{ secrets.ASC_API_KEY_P8 }}" | base64 -d > AuthKey.p8
+          xcrun notarytool submit BusyElf.zip \
+            --key AuthKey.p8 \
+            --key-id "${{ secrets.ASC_KEY_ID }}" \
+            --issuer "${{ secrets.ASC_ISSUER_ID }}" --wait
+          xcrun stapler staple BusyElf.app        # 把公证票钉进 app
+          rm AuthKey.p8
+          ditto -c -k --keepParent BusyElf.app BusyElf-notarized.zip
+
+      # 4) 挂到 Release
+      - uses: softprops/action-gh-release@v2
+        with: { files: build/export/BusyElf-notarized.zip }
