@@ -1,8 +1,8 @@
 import AppKit
 
 /// 单任务行(纯 AppKit)。点 × 就地翻成单段行内确认。
-/// 行对象按 id 复用,故确认态在快照刷新间得以保留。
-final class AgentRowView: NSView {
+/// 行对象按 id 复用,故确认态在快照刷新间得以保留。继承 HoverRow 获得悬停高亮。
+final class AgentRowView: HoverRow {
     let id: String
     private var session: TaskSession
     private var now: Date
@@ -26,15 +26,17 @@ final class AgentRowView: NSView {
         didSet {
             normalView.isHidden = confirming
             confirmView.isHidden = !confirming
+            hoverEnabled = !confirming   // 确认时不再高亮,避免与按钮抢视觉
         }
     }
+
+    private let topSeparator = UI.separator()
 
     init(session: TaskSession, now: Date) {
         self.id = session.id
         self.session = session
         self.now = now
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
+        super.init(hoverInset: 8)
 
         let container = NSStackView(views: [normalView, confirmView])
         container.orientation = .vertical
@@ -42,16 +44,27 @@ final class AgentRowView: NSView {
         container.spacing = 0
         container.translatesAutoresizingMaskIntoConstraints = false
         addSubview(container)
+        addSubview(topSeparator)
+        topSeparator.isHidden = true
         NSLayoutConstraint.activate([
-            container.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            container.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-            container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            container.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            container.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            container.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            container.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            // 内容撑满整行宽度,× 才能贴右、不再挤左
+            normalView.widthAnchor.constraint(equalTo: container.widthAnchor),
+            confirmView.widthAnchor.constraint(equalTo: container.widthAnchor),
+            topSeparator.topAnchor.constraint(equalTo: topAnchor),
+            topSeparator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            topSeparator.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
         confirmView.isHidden = true
         apply()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    /// 列表中非首行显示顶部细分隔线。
+    func setShowsTopSeparator(_ shows: Bool) { topSeparator.isHidden = !shows }
 
     // MARK: - 外部更新
 
@@ -146,9 +159,11 @@ final class AgentRowView: NSView {
         v.alignment = .leading
         v.spacing = 3
         v.translatesAutoresizingMaskIntoConstraints = false
-        // 让 row1 跟随容器宽度,× 才能贴右
-        row1.leadingAnchor.constraint(equalTo: v.leadingAnchor).isActive = true
-        row1.trailingAnchor.constraint(equalTo: v.trailingAnchor).isActive = true
+        // 三行都撑满容器宽度:row1 让 × 贴右,标签在右边距处截断
+        for sub in [row1, secondLabel, thirdLabel] {
+            sub.leadingAnchor.constraint(equalTo: v.leadingAnchor).isActive = true
+            sub.trailingAnchor.constraint(equalTo: v.trailingAnchor).isActive = true
+        }
         return v
     }
 
@@ -174,8 +189,10 @@ final class AgentRowView: NSView {
         v.alignment = .leading
         v.spacing = 5
         v.translatesAutoresizingMaskIntoConstraints = false
-        buttons.leadingAnchor.constraint(equalTo: v.leadingAnchor).isActive = true
-        buttons.trailingAnchor.constraint(equalTo: v.trailingAnchor).isActive = true
+        for sub in [confirmTitle, prompt, confirmWarn, buttons] {
+            sub.leadingAnchor.constraint(equalTo: v.leadingAnchor).isActive = true
+            sub.trailingAnchor.constraint(equalTo: v.trailingAnchor).isActive = true
+        }
         return v
     }
 

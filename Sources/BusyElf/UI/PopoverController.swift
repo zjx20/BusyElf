@@ -26,7 +26,7 @@ final class PopoverController: NSViewController {
     private let displaySwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
 
-    private let contentWidth: CGFloat = 320
+    private let contentWidth: CGFloat = 340
 
     // MARK: - 生命周期
 
@@ -97,11 +97,12 @@ final class PopoverController: NSViewController {
         }
         // 按 session 顺序重排 stack(行对象复用,确认态得以保留)
         for v in listStack.arrangedSubviews { listStack.removeArrangedSubview(v); v.removeFromSuperview() }
-        for s in sessions { if let row = rowsById[s.id] { listStack.addArrangedSubview(row) } }
-        // 行宽跟随列表
-        for row in listStack.arrangedSubviews {
+        for (index, s) in sessions.enumerated() {
+            guard let row = rowsById[s.id] else { continue }
+            listStack.addArrangedSubview(row)
             row.leadingAnchor.constraint(equalTo: listStack.leadingAnchor).isActive = true
             row.trailingAnchor.constraint(equalTo: listStack.trailingAnchor).isActive = true
+            row.setShowsTopSeparator(index > 0)   // 行间细分隔线(首行不画)
         }
 
         let empty = sessions.isEmpty
@@ -182,16 +183,17 @@ final class PopoverController: NSViewController {
     // MARK: - 视图工厂
 
     private func makeHeader() -> NSView {
-        boltIcon.image = UI.symbol("bolt.fill", size: 14, weight: .semibold)
+        boltIcon.image = UI.symbol("bolt.fill", size: 15, weight: .semibold)
         boltIcon.contentTintColor = .secondaryLabelColor
         boltIcon.translatesAutoresizingMaskIntoConstraints = false
         boltIcon.setContentHuggingPriority(.required, for: .horizontal)
 
-        let title = UI.label("BusyElf", size: 13, weight: .bold)
+        let title = UI.label("BusyElf", size: 14, weight: .bold)
         let titleStack = NSStackView(views: [title, subtitleLabel])
         titleStack.orientation = .vertical
         titleStack.alignment = .leading
-        titleStack.spacing = 1
+        titleStack.spacing = 3
+        titleStack.translatesAutoresizingMaskIntoConstraints = false
 
         let overflow = NSButton()
         overflow.image = UI.symbol("ellipsis", size: 13)
@@ -199,16 +201,46 @@ final class PopoverController: NSViewController {
         overflow.imagePosition = .imageOnly
         overflow.contentTintColor = .secondaryLabelColor
         overflow.target = self
-        overflow.action = #selector(showAbout)
-        overflow.toolTip = "关于 BusyElf"
+        overflow.action = #selector(showOverflowMenu(_:))
+        overflow.toolTip = "更多"
+        overflow.translatesAutoresizingMaskIntoConstraints = false
         overflow.setContentHuggingPriority(.required, for: .horizontal)
 
-        let row = NSStackView(views: [boltIcon, titleStack, UI.hSpacer(), overflow])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        row.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
-        return row
+        // 用显式约束控制四周留白:NSStackView.edgeInsets 在此嵌套场景不生效。
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(boltIcon)
+        container.addSubview(titleStack)
+        container.addSubview(overflow)
+        NSLayoutConstraint.activate([
+            titleStack.topAnchor.constraint(equalTo: container.topAnchor, constant: 13),
+            titleStack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -13),
+            boltIcon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            boltIcon.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
+            titleStack.leadingAnchor.constraint(equalTo: boltIcon.trailingAnchor, constant: 10),
+            overflow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            overflow.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
+            titleStack.trailingAnchor.constraint(lessThanOrEqualTo: overflow.leadingAnchor, constant: -8),
+        ])
+        return container
+    }
+
+    /// ⋯ overflow 菜单(低频项):版本号 + 关于。点击弹在按钮下方,而非直接跳转。
+    @objc private func showOverflowMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        let versionItem = NSMenuItem(title: "BusyElf \(version)", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        menu.addItem(.separator())
+
+        let about = NSMenuItem(title: "关于 BusyElf", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
 
     private func buildList() {
@@ -247,11 +279,9 @@ final class PopoverController: NSViewController {
         let loginRow = toggleRow(icon: "power", title: "开机启动",
                                  sw: loginSwitch, action: #selector(toggleLaunchAtLogin))
 
-        let quitButton = clickableRow(title: "Quit BusyElf", trailing: "⌘Q", action: #selector(quit))
-        quitButton.keyEquivalent = "q"
-        quitButton.keyEquivalentModifierMask = .command
+        let quitRow = clickableTextRow(title: "Quit BusyElf", trailing: "⌘Q") { [weak self] in self?.quit() }
 
-        let footer = NSStackView(views: [stopAllContainer, displayRow, loginRow, UI.separator(), quitButton])
+        let footer = NSStackView(views: [stopAllContainer, displayRow, loginRow, UI.separator(), quitRow])
         footer.orientation = .vertical
         footer.alignment = .leading
         footer.spacing = 0
@@ -265,6 +295,7 @@ final class PopoverController: NSViewController {
         return footer
     }
 
+    /// 开关行:整行可点切换 + hover 高亮(点开关本体或行任意处皆可)。
     private func toggleRow(icon: String, title: String, sw: NSSwitch, action: Selector) -> NSView {
         let img = NSImageView()
         img.image = UI.symbol(icon, size: 11)
@@ -278,40 +309,62 @@ final class PopoverController: NSViewController {
         sw.action = action
         sw.setContentHuggingPriority(.required, for: .horizontal)
 
-        let row = NSStackView(views: [img, label, UI.hSpacer(), sw])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 6
-        row.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        let content = NSStackView(views: [img, label, UI.hSpacer(), sw])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+
+        let row = ClickableRow()
+        row.onClick = { [weak sw] in
+            guard let sw else { return }
+            sw.state = (sw.state == .on) ? .off : .on
+            sw.sendAction(sw.action, to: sw.target)   // 与直接拨动开关同效
+        }
+        embed(content, in: row, insets: NSEdgeInsets(top: 7, left: 16, bottom: 7, right: 16))
         return row
     }
 
-    private func clickableRow(title: String, trailing: String, action: Selector) -> NSButton {
-        let button = NSButton(title: "", target: self, action: action)
-        button.isBordered = false
-        button.translatesAutoresizingMaskIntoConstraints = false
-
+    /// 纯文本行(Quit 等):整行可点 + hover 高亮。
+    private func clickableTextRow(title: String, trailing: String, onClick: @escaping () -> Void) -> ClickableRow {
         let label = UI.label(title, size: 12)
         let tip = UI.label(trailing, size: 11, color: .secondaryLabelColor)
-        let row = NSStackView(views: [label, UI.hSpacer(), tip])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.isHidden = false
-        button.addSubview(row)
+        let content = NSStackView(views: [label, UI.hSpacer(), tip])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+
+        let row = ClickableRow()
+        row.onClick = onClick
+        embed(content, in: row, insets: NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16))
+        return row
+    }
+
+    /// 把内容 stack 贴进 ClickableRow(留 insets)。
+    private func embed(_ content: NSStackView, in row: ClickableRow, insets: NSEdgeInsets) {
+        content.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(content)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: button.topAnchor),
-            row.bottomAnchor.constraint(equalTo: button.bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            content.topAnchor.constraint(equalTo: row.topAnchor, constant: insets.top),
+            content.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -insets.bottom),
+            content.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: insets.left),
+            content.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -insets.right),
         ])
-        return button
     }
 
     private func makeStopAllButton() -> NSView {
-        let button = clickableRow(title: "全部结束 (\(sessions.count))", trailing: "", action: #selector(askStopAll))
-        return button
+        let icon = NSImageView()
+        icon.image = UI.symbol("stop.circle", size: 12)
+        icon.contentTintColor = .secondaryLabelColor
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let label = UI.label("全部结束 (\(sessions.count))", size: 12)
+        let content = NSStackView(views: [icon, label, UI.hSpacer()])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+
+        let row = ClickableRow()
+        row.onClick = { [weak self] in self?.askStopAll() }
+        embed(content, in: row, insets: NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16))
+        return row
     }
 
     private func makeStopAllConfirm() -> NSView {
@@ -327,7 +380,7 @@ final class PopoverController: NSViewController {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 6
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
         return row
     }
 

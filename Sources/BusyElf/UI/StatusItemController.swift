@@ -12,14 +12,16 @@ final class StatusItemController {
     private let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
 
     private lazy var templateBolt: NSImage? = {
-        let img = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "BusyElf")
+        let base = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "BusyElf")
+        let img = base?.withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
         img?.isTemplate = true
         return img
     }()
 
     private lazy var orangeBolt: NSImage? = {
         let base = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "BusyElf")
-        let cfg = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+            .applying(.init(paletteColors: [.systemOrange]))
         let img = base?.withSymbolConfiguration(cfg)
         img?.isTemplate = false   // 颜色已烤进图,不让系统当模板重染
         return img
@@ -34,6 +36,7 @@ final class StatusItemController {
         guard let button = statusItem.button else { return }
         button.image = templateBolt
         button.imagePosition = .imageLeading           // 图标在左、数字在右
+        button.imageHugsTitle = true                   // 图标紧贴数字,缩小图文间距
         button.font = font
     }
 
@@ -60,17 +63,17 @@ final class StatusItemController {
         button.toolTip = Self.tooltip(working: workingCount, waiting: waitingCount)
 
         if hasWaiting {
-            // 需要关注:橙色图标 + 橙色数字
+            // 需要关注:橙色图标 + 橙色数字(无前导空格,紧贴图标)
             button.image = orangeBolt
             button.contentTintColor = nil
             button.attributedTitle = NSAttributedString(
-                string: " \(display)",
+                string: display,
                 attributes: [.foregroundColor: NSColor.systemOrange, .font: font])
         } else {
             // 在干活:template 全亮 + 默认色数字(随菜单栏明暗自适配)
             button.image = templateBolt
             button.contentTintColor = nil
-            button.title = " \(display)"
+            button.title = display
         }
     }
 

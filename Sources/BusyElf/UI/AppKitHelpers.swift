@@ -40,6 +40,67 @@ final class HoverButton: NSButton {
     override func mouseExited(with event: NSEvent) { contentTintColor = normalTint }
 }
 
+/// 带 hover 高亮背景的行(菜单项观感)。内容加在 highlight 之上。
+class HoverRow: NSView {
+    private let highlightView = NSView()
+    var hoverEnabled = true { didSet { refreshHighlight() } }
+    private(set) var hovering = false
+    private var trackingAreaRef: NSTrackingArea?
+
+    init(hoverInset: CGFloat = 8) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        highlightView.wantsLayer = true
+        highlightView.layer?.cornerRadius = 5
+        highlightView.layer?.backgroundColor = NSColor.clear.cgColor
+        highlightView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(highlightView)
+        NSLayoutConstraint.activate([
+            highlightView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            highlightView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
+            highlightView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hoverInset),
+            highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -hoverInset),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = trackingAreaRef { removeTrackingArea(t) }
+        let t = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(t)
+        trackingAreaRef = t
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; refreshHighlight() }
+    override func mouseExited(with event: NSEvent) { hovering = false; refreshHighlight() }
+
+    private func refreshHighlight() {
+        let on = hovering && hoverEnabled
+        highlightView.layer?.backgroundColor = on
+            ? NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
+            : NSColor.clear.cgColor
+    }
+}
+
+/// 整行可点的 HoverRow:label/空白处点击都算点中本行,但放过 NSSwitch / 内嵌按钮自行处理。
+final class ClickableRow: HoverRow {
+    var onClick: (() -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        if hit is NSSwitch || (hit is NSButton && hit !== self) { return hit }
+        return self
+    }
+    override func mouseUp(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if bounds.contains(p) { onClick?() }
+    }
+}
+
 enum UI {
     /// 文本 label(不可编辑、无边框、透明)。
     static func label(_ string: String = "",
