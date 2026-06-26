@@ -1,0 +1,361 @@
+import AppKit
+
+/// popover 内容(纯 AppKit,无 SwiftUI):状态头 → 可滚动任务列表 / 空态 → 底部开关。
+/// 替代原 SwiftUI 的 PopoverRootView + PopoverViewModel,目的是不链接 SwiftUI 以压低内存。
+///
+/// 1s 时长 ticker 仅在 popover 可见时运行(viewWillAppear/viewDidDisappear),空闲 0 CPU。
+final class PopoverController: NSViewController {
+    private var sessions: [TaskSession] = []
+    private var now = Date()
+    private var ticker: Timer?
+
+    private var rowsById: [String: AgentRowView] = [:]
+    private var confirmingStopAll = false
+
+    // 头部
+    private let boltIcon = NSImageView()
+    private let subtitleLabel = UI.label(size: 11, color: .secondaryLabelColor)
+
+    // 内容区
+    private let listStack = NSStackView()
+    private let scrollView = NSScrollView()
+    private let emptyView = PopoverController.makeEmptyView()
+
+    // 底部
+    private let stopAllContainer = NSView()
+    private let displaySwitch = NSSwitch()
+    private let loginSwitch = NSSwitch()
+
+    private let contentWidth: CGFloat = 320
+
+    // MARK: - 生命周期
+
+    override func loadView() {
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 0
+        root.translatesAutoresizingMaskIntoConstraints = false
+        root.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 6, right: 0)
+
+        let header = makeHeader()
+        let footer = makeFooter()
+        buildList()
+
+        for v in [header, UI.separator(), scrollView, emptyView, UI.separator(), footer] {
+            root.addArrangedSubview(v)
+            v.leadingAnchor.constraint(equalTo: root.leadingAnchor).isActive = true
+            v.trailingAnchor.constraint(equalTo: root.trailingAnchor).isActive = true
+        }
+        root.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        self.view = root
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        now = Date()
+        displaySwitch.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
+        loginSwitch.state = LoginItem.isEnabled ? .on : .off
+        rebuild()
+        startTicker()
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        stopTicker()
+        confirmingStopAll = false
+    }
+
+    // MARK: - 外部数据入口(AppDelegate 在 onChange 时调用)
+
+    func update(sessions: [TaskSession]) {
+        self.sessions = sessions
+        if isViewLoaded { rebuild() }
+    }
+
+    // MARK: - 渲染
+
+    private func rebuild() {
+        now = Date()
+        let ids = Set(sessions.map { $0.id })
+
+        // 移除消失的行
+        for (id, row) in rowsById where !ids.contains(id) {
+            row.removeFromSuperview()
+            rowsById[id] = nil
+        }
+        // 新增 / 更新现有行
+        for s in sessions {
+            if let row = rowsById[s.id] {
+                row.update(session: s, now: now)
+            } else {
+                let row = AgentRowView(session: s, now: now)
+                let id = s.id
+                row.onForceStop = { [weak self] in self?.onForceStop(id) }
+                rowsById[s.id] = row
+            }
+        }
+        // 按 session 顺序重排 stack(行对象复用,确认态得以保留)
+        for v in listStack.arrangedSubviews { listStack.removeArrangedSubview(v); v.removeFromSuperview() }
+        for s in sessions { if let row = rowsById[s.id] { listStack.addArrangedSubview(row) } }
+        // 行宽跟随列表
+        for row in listStack.arrangedSubviews {
+            row.leadingAnchor.constraint(equalTo: listStack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: listStack.trailingAnchor).isActive = true
+        }
+
+        let empty = sessions.isEmpty
+        scrollView.isHidden = empty
+        emptyView.isHidden = !empty
+
+        updateHeader()
+        updateFooter()
+    }
+
+    private func updateHeader() {
+        let working = sessions.lazy.filter { $0.status == .working }.count
+        let waiting = sessions.lazy.filter { $0.status == .waiting }.count
+        if sessions.isEmpty {
+            subtitleLabel.stringValue = "Idle · 允许休眠"
+            boltIcon.contentTintColor = .secondaryLabelColor
+        } else if working > 0 {
+            subtitleLabel.stringValue = "Blocking sleep · \(sessions.count) 个任务"
+            boltIcon.contentTintColor = waiting > 0 ? .systemOrange : .labelColor
+        } else {
+            subtitleLabel.stringValue = "等你处理 · \(sessions.count) 个任务"
+            boltIcon.contentTintColor = .systemOrange
+        }
+    }
+
+    private func updateFooter() {
+        stopAllContainer.subviews.forEach { $0.removeFromSuperview() }
+        guard !sessions.isEmpty else { stopAllContainer.isHidden = true; return }
+        stopAllContainer.isHidden = false
+        let content = confirmingStopAll ? makeStopAllConfirm() : makeStopAllButton()
+        stopAllContainer.addSubview(content)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: stopAllContainer.topAnchor),
+            content.bottomAnchor.constraint(equalTo: stopAllContainer.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: stopAllContainer.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: stopAllContainer.trailingAnchor),
+        ])
+    }
+
+    // MARK: - ticker
+
+    private func startTicker() {
+        stopTicker()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.now = Date()
+            for row in self.rowsById.values { row.refreshTime(now: self.now) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        ticker = timer
+    }
+    private func stopTicker() { ticker?.invalidate(); ticker = nil }
+
+    // MARK: - 动作
+
+    private func onForceStop(_ id: String) { TaskStore.shared.end(id: id) }
+
+    @objc private func toggleDisplayAwake() {
+        SleepGuard.shared.setKeepDisplayAwake(displaySwitch.state == .on)
+    }
+    @objc private func toggleLaunchAtLogin() {
+        LoginItem.setEnabled(loginSwitch.state == .on)
+        loginSwitch.state = LoginItem.isEnabled ? .on : .off   // 失败则回弹
+    }
+    @objc private func askStopAll() { confirmingStopAll = true; updateFooter() }
+    @objc private func cancelStopAll() { confirmingStopAll = false; updateFooter() }
+    @objc private func doStopAll() {
+        confirmingStopAll = false
+        TaskStore.shared.removeAll()
+    }
+    @objc private func quit() { NSApp.terminate(nil) }
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
+    }
+
+    // MARK: - 视图工厂
+
+    private func makeHeader() -> NSView {
+        boltIcon.image = UI.symbol("bolt.fill", size: 14, weight: .semibold)
+        boltIcon.contentTintColor = .secondaryLabelColor
+        boltIcon.translatesAutoresizingMaskIntoConstraints = false
+        boltIcon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let title = UI.label("BusyElf", size: 13, weight: .bold)
+        let titleStack = NSStackView(views: [title, subtitleLabel])
+        titleStack.orientation = .vertical
+        titleStack.alignment = .leading
+        titleStack.spacing = 1
+
+        let overflow = NSButton()
+        overflow.image = UI.symbol("ellipsis", size: 13)
+        overflow.isBordered = false
+        overflow.imagePosition = .imageOnly
+        overflow.contentTintColor = .secondaryLabelColor
+        overflow.target = self
+        overflow.action = #selector(showAbout)
+        overflow.toolTip = "关于 BusyElf"
+        overflow.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [boltIcon, titleStack, UI.hSpacer(), overflow])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        return row
+    }
+
+    private func buildList() {
+        listStack.orientation = .vertical
+        listStack.alignment = .leading
+        listStack.spacing = 0
+        listStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let doc = FlippedView()
+        doc.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(listStack)
+        NSLayoutConstraint.activate([
+            listStack.topAnchor.constraint(equalTo: doc.topAnchor),
+            listStack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+            listStack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            listStack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+        ])
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.documentView = doc
+        doc.widthAnchor.constraint(equalTo: scrollView.widthAnchor).isActive = true
+
+        // 高度 = 内容高度,封顶 320,超出滚动
+        let fit = scrollView.heightAnchor.constraint(equalTo: doc.heightAnchor)
+        fit.priority = .defaultHigh
+        fit.isActive = true
+        scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
+    }
+
+    private func makeFooter() -> NSView {
+        let displayRow = toggleRow(icon: "moon.fill", title: "也保持屏幕唤醒",
+                                   sw: displaySwitch, action: #selector(toggleDisplayAwake))
+        let loginRow = toggleRow(icon: "power", title: "开机启动",
+                                 sw: loginSwitch, action: #selector(toggleLaunchAtLogin))
+
+        let quitButton = clickableRow(title: "Quit BusyElf", trailing: "⌘Q", action: #selector(quit))
+        quitButton.keyEquivalent = "q"
+        quitButton.keyEquivalentModifierMask = .command
+
+        let footer = NSStackView(views: [stopAllContainer, displayRow, loginRow, UI.separator(), quitButton])
+        footer.orientation = .vertical
+        footer.alignment = .leading
+        footer.spacing = 0
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        for v in footer.arrangedSubviews {
+            v.leadingAnchor.constraint(equalTo: footer.leadingAnchor).isActive = true
+            v.trailingAnchor.constraint(equalTo: footer.trailingAnchor).isActive = true
+        }
+        stopAllContainer.translatesAutoresizingMaskIntoConstraints = false
+        stopAllContainer.isHidden = true
+        return footer
+    }
+
+    private func toggleRow(icon: String, title: String, sw: NSSwitch, action: Selector) -> NSView {
+        let img = NSImageView()
+        img.image = UI.symbol(icon, size: 11)
+        img.contentTintColor = .secondaryLabelColor
+        img.translatesAutoresizingMaskIntoConstraints = false
+        img.widthAnchor.constraint(equalToConstant: 16).isActive = true
+
+        let label = UI.label(title, size: 12)
+        sw.controlSize = .mini
+        sw.target = self
+        sw.action = action
+        sw.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [img, label, UI.hSpacer(), sw])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        return row
+    }
+
+    private func clickableRow(title: String, trailing: String, action: Selector) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = UI.label(title, size: 12)
+        let tip = UI.label(trailing, size: 11, color: .secondaryLabelColor)
+        let row = NSStackView(views: [label, UI.hSpacer(), tip])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.isHidden = false
+        button.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: button.topAnchor),
+            row.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+        ])
+        return button
+    }
+
+    private func makeStopAllButton() -> NSView {
+        let button = clickableRow(title: "全部结束 (\(sessions.count))", trailing: "", action: #selector(askStopAll))
+        return button
+    }
+
+    private func makeStopAllConfirm() -> NSView {
+        let prompt = UI.label("结束全部 \(sessions.count) 个任务?", size: 12)
+        let stop = NSButton(title: "结束", target: self, action: #selector(doStopAll))
+        stop.controlSize = .small
+        stop.bezelColor = .systemRed
+        let cancel = NSButton(title: "取消", target: self, action: #selector(cancelStopAll))
+        cancel.controlSize = .small
+        cancel.isBordered = false
+
+        let row = NSStackView(views: [prompt, UI.hSpacer(), stop, cancel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        return row
+    }
+
+    private static func makeEmptyView() -> NSView {
+        let hammer = NSImageView()
+        hammer.image = UI.symbol("hammer.fill", size: 26)
+        hammer.contentTintColor = .tertiaryLabelColor
+
+        let l1 = UI.label("工作台是空的。", size: 13, weight: .medium)
+        let l2 = UI.label("当前没有 agent 在工作。Mac 会正常 idle 休眠。", size: 11,
+                          color: .secondaryLabelColor, truncates: false)
+        let l3 = UI.label("(注:合上盖子仍会休眠 — 长任务请开盖接电)", size: 10,
+                          color: .tertiaryLabelColor, truncates: false)
+        l2.alignment = .center
+        l3.alignment = .center
+        [l2, l3].forEach { $0.maximumNumberOfLines = 2 }
+
+        let stack = NSStackView(views: [hammer, l1, l2, l3])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 26, left: 16, bottom: 26, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+}
+
+/// 翻转坐标系的 document view,让滚动内容从顶部排起。
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}

@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 import UserNotifications
 
 /// 持有 `NSStatusItem` + `NSPopover` + server 生命周期;
@@ -8,7 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var statusController: StatusItemController!
     private let popover = NSPopover()
-    private let viewModel = PopoverViewModel()
+    private var popoverController: PopoverController?   // 懒加载,纯 AppKit
+    private var latestSessions: [TaskSession] = []      // 给首次创建的 popover 喂初值
     private var server: LoopbackServer!
 
     // MARK: - 生命周期
@@ -44,15 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setUpPopover() {
         popover.behavior = .transient        // 点外部自动关闭
         popover.animates = true
-        // 不在启动时建 NSHostingController —— 那会把整套 SwiftUI 机器load进内存,
-        // 抬高 idle 内存地板。改为首次打开时懒加载(见 ensurePopoverContent)。
+        // 首次打开时才建内容控制器(见 ensurePopoverContent),启动期不构建 UI。
     }
 
-    /// 首次打开 popover 时才实例化 SwiftUI host,把 SwiftUI 的内存成本推迟到真正需要时。
+    /// 首次打开 popover 时才实例化内容控制器(纯 AppKit,不链接 SwiftUI)。
     private func ensurePopoverContent() {
-        guard popover.contentViewController == nil else { return }
-        popover.contentViewController = NSHostingController(
-            rootView: PopoverRootView(viewModel: viewModel))
+        guard popoverController == nil else { return }
+        let controller = PopoverController()
+        controller.update(sessions: latestSessions)   // 喂入当前快照
+        popover.contentViewController = controller
+        popoverController = controller
     }
 
     private func wireStore() {
@@ -79,10 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - TaskStore 变更 → UI
 
     private func handleStoreChange(_ sessions: [TaskSession]) {
+        latestSessions = sessions
         let working = sessions.filter { $0.status == .working }.count
         let waiting = sessions.filter { $0.status == .waiting }.count
         statusController.refresh(workingCount: working, waitingCount: waiting)
-        viewModel.apply(snapshot: sessions)
+        popoverController?.update(sessions: sessions)   // 仅在已创建时刷新
     }
 
     // MARK: - 状态栏点击:左键 popover / 右键菜单
