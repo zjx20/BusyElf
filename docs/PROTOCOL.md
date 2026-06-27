@@ -122,6 +122,19 @@ curl -sS -m2 -X POST http://127.0.0.1:17872/v1/task/end \
 
 实际接入时,字段翻译由适配器完成。Claude Code 适配器见 [adapters/claude-code.md](adapters/claude-code.md)。
 
+## 内建适配器端点(便捷,不破坏中立)
+
+除了上面 agent 中立的 `/v1/task/*`,BusyElf 还内建了一个 **Claude Code 专属便捷端点**:
+
+### `POST /claude/hooks` — Claude Code hook 入口
+
+直接接收 Claude Code **HTTP hook**(`type: "http"`)发来的**原始 hook payload**,在服务端按 `hook_event_name` 翻成上面的 4 动词。好处:用户无需在 hook 里写 `jq`+`curl`(很多人没装 `jq`),配置就是把各 hook 指向这一个 URL。
+
+- **不改变中立核心**:Claude 专属知识(字段名、事件→动词映射)全部隔离在服务端一个文件([`ClaudeHookEvent.swift`](../Sources/BusyElf/Server/ClaudeHookEvent.swift)),`TaskStore` 与协议状态机一行不变、永不 import Claude 概念。它就是"把方式 B 的 jq 翻译搬进了 Swift"。
+- **响应**:始终回 `2xx + 空 body`(Claude 把"2xx 空体"视为无操作,等同退出码 0 无输出)——BusyElf 是纯被动观察者,绝不阻止工具/注入上下文/改 Claude 流程。
+- **容错**:与 `/v1/task/*` 同档,非 JSON / 缺 `session_id` / 未知事件一律静默忽略,仍回 200。
+- 详见 [adapters/claude-code.md](adapters/claude-code.md)。其它 agent 仍走通用 `/v1/task/*`;是否为某个 agent 再加这种便捷端点,取决于它是否值得作"一等公民"。
+
 ## 编写一个新适配器(如 Codex CLI)
 
 1. 找出该 agent 的"任务开始 / 有进展 / 等待用户 / 任务结束"四类原生信号。

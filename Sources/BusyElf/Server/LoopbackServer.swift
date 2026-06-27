@@ -101,8 +101,8 @@ final class LoopbackServer {
                     connection.cancel()
                     return
                 case .request(let req):
-                    self.router.route(method: req.method, path: req.path, body: req.body)
-                    self.respond(on: connection)
+                    let responseBody = self.router.route(method: req.method, path: req.path, body: req.body)
+                    self.respond(on: connection, body: responseBody)
                     return
                 }
             }
@@ -115,8 +115,7 @@ final class LoopbackServer {
         }
     }
 
-    private func respond(on connection: NWConnection) {
-        let body = "{\"ok\":true}"
+    private func respond(on connection: NWConnection, body: String) {
         let response = """
         HTTP/1.1 200 OK\r
         Content-Type: application/json\r

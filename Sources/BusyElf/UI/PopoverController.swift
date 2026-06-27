@@ -111,6 +111,18 @@ final class PopoverController: NSViewController {
 
         updateHeader()
         updateFooter()
+        syncContentSize()
+    }
+
+    /// 让 popover 高度跟内容走。`NSPopover` 长高很积极,但内容变矮(任务清空)时**不会自动缩回**——
+    /// 残余高度会被根 stack 摊给最易拉伸的头部,把 bolt/⋯ 浮到中间,看着像"残留一个占大半篇幅的 item"。
+    /// 显式同步 `preferredContentSize`(NSPopover 会观察它)即可在增/减两个方向都缩放到内容实际高度。
+    private func syncContentSize() {
+        view.layoutSubtreeIfNeeded()
+        let h = view.fittingSize.height
+        guard h > 0 else { return }
+        let size = NSSize(width: contentWidth, height: h)
+        if preferredContentSize != size { preferredContentSize = size }
     }
 
     private func updateHeader() {

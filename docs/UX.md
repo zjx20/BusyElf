@@ -26,7 +26,7 @@ N=0 空闲:        [ ⚡︎ ]
 
 ## Popover
 
-`NSPopover` 锚定状态栏按钮,固定宽 ~320pt,内容用 SwiftUI(`NSHostingController`)。结构:状态头 → 可滚动任务列表(超过 ~5 行滚动)→ 细分隔线 → 底部开关。
+`NSPopover` 锚定状态栏按钮,固定宽 ~320pt,内容用**纯 AppKit**(`NSViewController` + `NSStackView`/`NSView`,**不用** `NSHostingController`、不链接 SwiftUI——这是 ~12MB footprint 的关键,见 DESIGN.md §2)。结构:状态头 → 可滚动任务列表(超过 ~5 行滚动)→ 细分隔线 → 底部开关。
 
 ### 空态(N=0)
 

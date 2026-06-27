@@ -19,12 +19,14 @@
    各 Agent(Claude Code / Codex / …)
         │  原生事件(hook/lifecycle)
         ▼
-   适配器层(每个 agent 各自一份;做字段翻译)
-        │  HTTP POST  /v1/task/{start|update|wait|end}  (中立 body)
+   适配器:两条入口都映射到同一套中立 4 动词
+     A) Claude HTTP hook ── 原始 payload ──▶ POST /claude/hooks (BusyElf 内建翻译, 免 jq)
+     B) 通用 jq+curl 翻译 ── 中立 body ────▶ POST /v1/task/{start|update|wait|end}
         ▼
    ┌──────────────── BusyElf.app (单进程, 纯 AppKit, LSUIElement) ─────────────┐
    │  LoopbackServer (NWListener, 127.0.0.1, 事件驱动)                          │
-   │        │ 按路径路由到动词 + 容错解析 body                                  │
+   │        │ Router 按路径分流:/claude/hooks → ClaudeHookEvent 翻译;          │
+   │        │ /v1/task/* → 中立 body。两者都落到同一套 4 动词 + 容错解析        │
    │        ▼                                                                  │
    │  TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/remove                │
    │        │ reconcile()                                                      │
@@ -91,6 +93,8 @@ BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PRO
 | `POST /v1/task/end`    | 结束任务 | `id`* | 移除任务 |
 
 所有 agent 专属知识(字段名、事件语义)都下沉到适配器层;BusyElf 服务端永不 import 一个具体 agent 的概念。
+
+**内建 Claude 便捷端点**:除中立的 `/v1/task/*`,服务端还内建 `POST /claude/hooks`,直吃 Claude Code 的 HTTP hook 原始 payload(`type:"http"`,免 `jq`+`curl`),按 `hook_event_name` 翻成同一套 4 动词。Claude 专属知识仍只隔离在 `Server/ClaudeHookEvent.swift` 一个文件里——`TaskStore`/状态机不变,核心仍中立。它让 Claude Code 成为"一等公民",但不耦合:其它 agent 仍走 `/v1/task/*`。该端点始终回 `2xx + 空 body`(Claude 视为无操作),保证 BusyElf 是纯被动观察者。详见 [PROTOCOL.md](PROTOCOL.md) 与 [adapters/claude-code.md](adapters/claude-code.md)。
 
 ## 5. 任务状态机
 
@@ -168,9 +172,10 @@ struct TaskSession: Identifiable {
 | `Power/SleepGuard.swift` | 单个引用计数的 `IOPMAssertion`;`setBlocked(Bool)`;可选第二个显示断言 |
 | `State/TaskSession.swift` | `TaskSession` 值类型 + `TaskStatus` + `elapsed/isStuck` 辅助 |
 | `State/TaskStore.swift` | 真相源 `[id: TaskSession]`;串行队列;`start/update/wait/end` 幂等 upsert/remove;`reconcile()` 驱动 SleepGuard + onChange |
-| `Server/LoopbackServer.swift` | `NWListener`(loopback)、accept、手解析 `POST /v1/task/*`、取 body |
-| `Server/TaskEvent.swift` | 中立 body 的 `Codable`(`id/name/tool/detail/message/reply/agent`)+ 容错解析 |
-| `Server/Router.swift` | 路径 → 动词 → 调 `TaskStore` |
+| `Server/LoopbackServer.swift` | `NWListener`(loopback)、accept、手解析 HTTP、取 body;把 `Router.route` 返回的响应 body 回给客户端(v1 回 `{"ok":true}`,`/claude/hooks` 回空体) |
+| `Server/TaskEvent.swift` | 中立 body 的容错解析(`id/name/tool/detail/message/reply/agent/cwd`) |
+| `Server/Router.swift` | 路径分流 → 动词 → 调 `TaskStore`;`/claude/hooks` 走 Claude 适配,`/v1/task/*` 走中立 |
+| `Server/ClaudeHookEvent.swift` | **内建 Claude 适配器**:把 Claude hook 原始 payload 按 `hook_event_name` 翻成中立动作(唯一懂 Claude 字段的文件) |
 | `UI/StatusItemController.swift` | `refresh(workingCount:waitingCount:)`:bolt 明暗 + 数字 + 关注态(waiting 用 palette 烤橙 + 橙色数字) |
 | `UI/PopoverController.swift` | 纯 AppKit `NSViewController`:状态头、可滚动任务列表、空态、底部开关;仅可见时的 1s 时长 ticker;⋯ overflow 菜单 |
 | `UI/AgentRowView.swift` | 单任务行 `NSView`:状态点、项目名、任务/活动、时长、`×` 行内确认;按 id 复用 + hover 高亮 |
@@ -196,7 +201,7 @@ struct TaskSession: Identifiable {
 | 阻止休眠 | `IOPMAssertionCreateWithName(PreventUserIdleSystemSleep)` | == `caffeinate -i`;无子进程、崩溃自动回收、sandbox 安全 |
 | 计数模型 | `id` 字典 + 幂等增删 | 事件会丢/重;整数计数器会永久卡住休眠 |
 | 协议 | agent 中立的 4 动词 HTTP | 不绑 Claude;未来接 Codex 等只需写适配器 |
-| Hook 传输 | 适配器内 `jq + curl` 直调 HTTP | 不 ship 二进制;字段翻译留在适配器层 |
+| Hook 传输 | Claude 走内建 `/claude/hooks`(HTTP hook,零依赖);通用走 `jq+curl`→`/v1/task/*` | `jq` 非人人有,内建适配体验更好;翻译隔离在一个文件,核心仍中立、不 ship 二进制 |
 | 服务器 | `NWListener` loopback,事件驱动 | 0 空闲 CPU、零依赖、免本地网络隐私弹窗 |
 | 崩溃自愈 | 不做自动探测;靠手动移除 | 小概率;换取零后台定时器 |
 | 强制结束 | 仅移除任务,不杀进程 | 用户明确要求;沙盒/分发不再被绑死 |
@@ -215,8 +220,9 @@ struct TaskSession: Identifiable {
 
 ## 14. 待确认 / 注意事项
 
-- **Claude Code hook 字段名需真机确认**:`UserPromptSubmit` 的 prompt 字段叫 `prompt` 还是 `prompt_text`、`SessionEnd` 的 `reason`/`end_reason` 等,多轮 web 核实**自相矛盾**,**不要凭记忆硬编码**。好在这些只影响适配器层的 jq 与展示(降级即可),**打不进核心休眠逻辑**(逻辑只看路径 + `id`)。P1 用 `cat >> ~/busyelf-hook-capture.ndjson` 抓一遍即可锁定。
-- **`notification_type` 不可靠**:多数核实显示该字段实际不下发(#11964 closed-not-planned)。本设计**不依赖**它(靠状态机时序区分 permission vs idle)。
-- **`jq` 依赖**:Claude 适配器需要用户安装 `jq`(`brew install jq`)。它是用户自带工具,非我们 ship 的 helper。
+- **Claude Code hook 字段名(已对照官方 hooks 参考锁定)**:prompt 文本字段就是 **`prompt`**;`PostToolUse` 看 `tool_name` + `tool_input.{command,file_path,…}`;`Notification` 看 `message`;`Stop`/`SessionEnd` 只凭事件名 `end`。即便某版本字段不同也只影响展示(降级即可),**打不进核心休眠逻辑**(逻辑只看 `hook_event_name` + `session_id`)。
+- **刻意不读 `notification_type`**:官方 hooks 参考确实列了该字段(含 `permission_prompt`/`idle_prompt`),但本设计**故意不依赖**它——靠状态机时序区分 permission vs idle(`wait` 在 `Stop` 已移除任务后自然被忽略),这样即便某版本字段缺失/语义变化也稳。
+- **`jq` 现在可选**:推荐用内建 `/claude/hooks`(HTTP hook,零依赖);仍想用通用 jq+curl→`/v1/task/*` 的才需 `brew install jq`。
+- **HTTP hook URL 写死端口**:`/claude/hooks` 的 URL 含默认 `17872`;若该端口被占用、BusyElf 回退到 17873+,需把 URL 端口同步改掉(与 jq 方案的 curl URL 同样限制)。
 - **多 agent 接入**(Codex CLI 等):各写适配器映射到同一套 4 动词;BusyElf 无需改动。
-- **环境约束**:当前 Linux dev container 无法编译/运行 macOS 应用;构建/签名/运行在 macOS 上进行。
+- **环境约束**:构建/签名/运行/真机验证均在 macOS 进行(已在 macOS 26 / Apple Silicon 真机编译、运行、验证通过)。
