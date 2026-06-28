@@ -8,6 +8,10 @@ final class ClaudeHookEventTests: XCTestCase {
         ClaudeHookEvent.parse(Data(json.utf8))
     }
 
+    private func translate(_ json: String) -> ClaudeHookEvent? {
+        ClaudeHookEvent.translate(Data(json.utf8))
+    }
+
     func testUserPromptSubmit() {
         let e = parse(#"{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"/c","prompt":"hi"}"#)
         XCTAssertEqual(e?.id, "s")
@@ -157,5 +161,62 @@ final class ClaudeHookEventTests: XCTestCase {
         // file_path 优先于其它(command 不在时)
         let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Edit","tool_input":{"file_path":"a.swift"}}"#)
         XCTAssertEqual(e?.action, .update(tool: "Edit", detail: "a.swift", reply: nil, replyAppend: false, toolComplete: true))
+    }
+
+    // MARK: - 子任务输入关联(translate,有状态;各用独立 session 防串扰)
+
+    /// 父 PreToolUse(Agent) 的 description 暂存 → 紧接的 SubagentStart 领取为子任务输入。
+    func testSubagentInputFromAgentDescription() {
+        // 父即将 spawn:detail 取 description(优先于 prompt)。仍正常返回父的 update(活动显示)。
+        let pre = translate(#"{"hook_event_name":"PreToolUse","session_id":"S1","tool_name":"Agent","tool_input":{"description":"找 API 端点","prompt":"Find all API endpoints in the repo","subagent_type":"Explore"}}"#)
+        XCTAssertEqual(pre?.id, "S1")
+        XCTAssertEqual(pre?.action, .update(tool: "Agent", detail: "找 API 端点", reply: nil, replyAppend: false, toolComplete: false))
+        // SubagentStart 领取 → 子任务 start 带上 description 作为输入。
+        let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S1","agent_id":"a1","agent_type":"Explore"}"#)
+        XCTAssertEqual(start?.id, "S1#a1")
+        XCTAssertEqual(start?.parentId, "S1")
+        XCTAssertEqual(start?.action, .start(prompt: "找 API 端点"))
+    }
+
+    /// description 缺失时退化用 prompt。
+    func testSubagentInputFallsBackToPrompt() {
+        _ = translate(#"{"hook_event_name":"PreToolUse","session_id":"S2","tool_name":"Agent","tool_input":{"prompt":"重构登录模块","subagent_type":"general-purpose"}}"#)
+        let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S2","agent_id":"a1","agent_type":"general-purpose"}"#)
+        XCTAssertEqual(start?.action, .start(prompt: "重构登录模块"))
+    }
+
+    /// 没有前置 PreToolUse(Agent) 时,SubagentStart 领不到 → 降级为无输入(同旧行为)。
+    func testSubagentStartWithoutPendingStaysNil() {
+        let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S3","agent_id":"a1","agent_type":"Explore"}"#)
+        XCTAssertEqual(start?.action, .start(prompt: nil))
+    }
+
+    /// 串行两个子任务按 FIFO 各领各的(实测事件流即紧邻串行)。
+    func testSubagentInputFifoOrder() {
+        _ = translate(#"{"hook_event_name":"PreToolUse","session_id":"S4","tool_name":"Agent","tool_input":{"description":"任务A"}}"#)
+        let a = translate(#"{"hook_event_name":"SubagentStart","session_id":"S4","agent_id":"a1","agent_type":"Explore"}"#)
+        XCTAssertEqual(a?.action, .start(prompt: "任务A"))
+        _ = translate(#"{"hook_event_name":"PreToolUse","session_id":"S4","tool_name":"Agent","tool_input":{"description":"任务B"}}"#)
+        let b = translate(#"{"hook_event_name":"SubagentStart","session_id":"S4","agent_id":"a2","agent_type":"Explore"}"#)
+        XCTAssertEqual(b?.action, .start(prompt: "任务B"))
+    }
+
+    /// 父 turn 结束(Stop,无 parentId)清掉残留暂存 → 后续子任务领不到(不跨 turn 串位)。
+    func testParentStopClearsPendingInput() {
+        _ = translate(#"{"hook_event_name":"PreToolUse","session_id":"S5","tool_name":"Agent","tool_input":{"description":"残留输入"}}"#)
+        // 父 Stop:turn 边界,清队列。
+        let stop = translate(#"{"hook_event_name":"Stop","session_id":"S5","last_assistant_message":"done"}"#)
+        XCTAssertEqual(stop?.action, .done(reply: "done"))
+        let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S5","agent_id":"a1","agent_type":"Explore"}"#)
+        XCTAssertEqual(start?.action, .start(prompt: nil))   // 已被清,领不到
+    }
+
+    /// 子任务自身的 done(带 parentId)不应清父会话暂存。
+    func testSubagentStopDoesNotClearParentPending() {
+        _ = translate(#"{"hook_event_name":"PreToolUse","session_id":"S6","tool_name":"Agent","tool_input":{"description":"给下一个子任务"}}"#)
+        // 某子任务结束(带 agent_id → parentId 非空),不该误清父的暂存。
+        _ = translate(#"{"hook_event_name":"SubagentStop","session_id":"S6","agent_id":"older","last_assistant_message":"x"}"#)
+        let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S6","agent_id":"a1","agent_type":"Explore"}"#)
+        XCTAssertEqual(start?.action, .start(prompt: "给下一个子任务"))
     }
 }

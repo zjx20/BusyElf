@@ -51,6 +51,11 @@ struct ClaudeHookEvent {
     /// 写进任务的来源标签,用于 UI 展示/分组。
     static let agentLabel = "claude-code"
 
+    /// 子任务输入关联器(有状态)。子任务的输入(Agent 工具的 description/prompt)只在父会话的
+    /// `PreToolUse(Agent)` 里、且**不带 `agent_id`**;`SubagentStart` 只带 `agent_id` 不带输入。
+    /// 二者唯一共享键是 `session_id`,实测又是紧邻串行发出,故按 session 暂存、由 SubagentStart 领取。
+    private static let correlator = SubagentInputCorrelator()
+
     /// 宽容解析。仅当 body 根本不是 JSON 对象时返回 nil(交由 Router 忽略),保证服务端永不因 body 崩。
     static func parse(_ data: Data) -> ClaudeHookEvent? {
         guard !data.isEmpty,
@@ -170,6 +175,33 @@ struct ClaudeHookEvent {
         return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action)
     }
 
+    /// 在纯 [parse] 之上叠加"子任务输入"关联(有状态)。
+    /// **必须每事件只调一次**(`routeClaude` 单点调用):有副作用(暂存/领取/清队列),
+    /// 重复调用会双推双弹而串位——故关联逻辑放这里,而非在调试日志里被二次调用的 [parse] 内。
+    /// 三个触点:
+    ///   - 父 `PreToolUse(Agent/Task)`(toolComplete=false):暂存其输入(`detail` 已是 description,空则退化 prompt);
+    ///   - `SubagentStart`(`.start(nil)` 且有 parentId):领取暂存输入作为子任务 prompt,UI 输入行直接复用;领不到则降级为无输入;
+    ///   - 父 turn 结束(`.done`/`.fail` 且无 parentId,即 Stop/SessionEnd/StopFailure):清掉该会话残留暂存(turn 边界=状态重置)。
+    static func translate(_ data: Data) -> ClaudeHookEvent? {
+        guard let e = parse(data) else { return nil }
+        switch e.action {
+        case let .update(tool, detail, _, _, toolComplete, _, _)
+            where (tool == "Agent" || tool == "Task") && !toolComplete:
+            if let sid = e.id, let d = detail, !d.isEmpty { correlator.push(session: sid, input: d) }
+            return e
+        case .start(nil) where e.parentId != nil:
+            guard let sid = e.parentId, let input = correlator.pop(session: sid) else { return e }
+            return ClaudeHookEvent(id: e.id, parentId: e.parentId, name: e.name, cwd: e.cwd,
+                                   action: .start(prompt: input))
+        case .done, .fail:
+            // 子任务的 done/fail 带 parentId,不在此清;只有父 turn 结束(parentId==nil)才重置该会话暂存。
+            if e.parentId == nil, let sid = e.id { correlator.clear(session: sid) }
+            return e
+        default:
+            return e
+        }
+    }
+
     // MARK: - 私有
 
     /// 取字符串字段;数字也强转字符串。缺失/类型不符 → nil。
@@ -204,5 +236,46 @@ struct ClaudeHookEvent {
             if let v = string(input, key), !v.isEmpty { return v }
         }
         return nil
+    }
+}
+
+/// 子任务输入暂存:父 `PreToolUse(Agent)` 入队、紧接的 `SubagentStart` 领取(按 session_id FIFO)。
+/// **双重上限防无限增长**:单会话队列上限 + 跟踪会话总数上限(超出淘汰最旧会话);另由 [ClaudeHookEvent.translate]
+/// 在父 turn 结束时清队列。线程安全(hook 可能来自不同连接,虽源头串行仍加锁保内存安全)。
+/// 关联失败只是子任务无输入行(优雅降级),绝不影响休眠/状态正确性。
+private final class SubagentInputCorrelator {
+    private let lock = NSLock()
+    private var pending: [String: [String]] = [:]   // session_id → 待领取输入队列(FIFO)
+    private var order: [String] = []                 // session 插入顺序,用于会话级淘汰
+    private let perSessionCap = 8                     // 单会话队列上限(SubagentStart 缺失时不无界堆积)
+    private let sessionCap = 32                       // 跟踪会话总数上限(长跑下不无界堆积)
+
+    func push(session: String, input: String) {
+        lock.lock(); defer { lock.unlock() }
+        if pending[session] == nil { order.append(session) }
+        var q = pending[session] ?? []
+        q.append(input)
+        if q.count > perSessionCap { q.removeFirst(q.count - perSessionCap) }
+        pending[session] = q
+        while order.count > sessionCap, let oldest = order.first { removeLocked(oldest) }
+    }
+
+    func pop(session: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard var q = pending[session], !q.isEmpty else { return nil }
+        let v = q.removeFirst()
+        if q.isEmpty { removeLocked(session) } else { pending[session] = q }
+        return v
+    }
+
+    func clear(session: String) {
+        lock.lock(); defer { lock.unlock() }
+        removeLocked(session)
+    }
+
+    /// 需在持锁下调用:移除某会话的全部暂存与顺序记录。
+    private func removeLocked(_ session: String) {
+        pending[session] = nil
+        if let i = order.firstIndex(of: session) { order.remove(at: i) }
     }
 }

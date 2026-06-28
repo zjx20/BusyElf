@@ -207,6 +207,12 @@ expect "子任务 id = session#agent" "$(has 'P#a1')" "true"
 expect "子任务 parentId=父 session" "$(fld 'P#a1' parentId)" "P"
 expect "子任务标签=agent_type" "$(fld 'P#a1' name)" "Explore"
 expect "子任务 working 也阻止休眠" ".blocking" "true"
+# 子任务输入(实时关联):父 PreToolUse(Agent) 的 description 暂存 → 紧接的 SubagentStart 领取为子任务 prompt(UI 输入行复用)
+hook '{"hook_event_name":"PreToolUse","session_id":"P","tool_name":"Agent","tool_input":{"description":"找 API 端点","prompt":"Find all API endpoints","subagent_type":"Explore"}}'
+hook '{"hook_event_name":"SubagentStart","session_id":"P","agent_id":"a2","agent_type":"Explore"}'
+expect "子任务输入=Agent 的 description(实时关联)" "$(fld 'P#a2' prompt)" "找 API 端点"
+expect "无前置 Agent 调用的子任务则无输入(降级)" "$(fld 'P#a1' prompt)" "null"
+hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a2","last_assistant_message":"done"}'
 hook '{"hook_event_name":"PostToolUse","session_id":"P","agent_id":"a1","agent_type":"Explore","tool_name":"Grep","tool_input":{"pattern":"foo"}}'
 expect "子任务工具刷新" "$(fld 'P#a1' activity)" "Grep: foo"
 hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a1","last_assistant_message":"找到 3 处"}'
