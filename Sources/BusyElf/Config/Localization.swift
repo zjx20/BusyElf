@@ -33,6 +33,7 @@ extension L {
         static func waiting(_ n: Int) -> String { pick("\(n) waiting on you", "\(n) 个等你处理") }
         static var hasFailed: String { pick("failures, click to view", "有失败,点开查看") }
         static var hasDone: String { pick("completed, click to view", "有完成,点开查看") }
+        static var unreachable: String { pick("port in use, not receiving events — click to view", "端口被占用,未在接收事件 — 点开查看") }
     }
 }
 
@@ -169,6 +170,40 @@ extension L {
             pick("Listening: \(host):\(port)", "监听:\(host):\(port)")
         }
         static var notReady: String { pick("Listening: not ready", "监听:未就绪") }
+        static var setup: String { pick("Connect an agent…", "接入 agent…") }
+    }
+}
+
+// MARK: - 端口冲突横幅(PopoverController)
+
+extension L {
+    enum Banner {
+        static func unreachable(port: UInt16) -> String {
+            pick("Port \(port) is in use — not receiving events", "端口 \(port) 被占用 — 未在接收事件")
+        }
+        static var retry: String { pick("Retry", "重试") }
+        static var changePort: String { pick("Change port", "改端口") }
+    }
+}
+
+// MARK: - 接入向导(PopoverController「接入 agent…」)
+
+extension L {
+    enum Setup {
+        static var title: String { pick("Connect an agent to BusyElf", "把 agent 接入 BusyElf") }
+        static var tutorial: String {
+            pick("Find the agent you use below, click its “Copy prompt”, then paste into that agent's chat — it configures BusyElf for you. Then run a task and watch the ⚡.",
+                 "在下面找到你正在用的 agent,点它的「复制提示词」,粘进那个 agent 的对话框 —— 它会替你配好 BusyElf。然后跑个任务,看菜单栏 ⚡。")
+        }
+        static var moreComing: String { pick("More agents coming soon.", "后续会支持更多 agent。") }
+        static var copy: String { pick("Copy prompt", "复制提示词") }
+        static var copied: String { pick("Copied ✓", "已复制 ✓") }
+        static var viewDocs: String { pick("View docs", "查看文档") }
+        static var close: String { pick("Close", "关闭") }
+        static var otherHarness: String { pick("Other", "其他") }
+        static var notReady: String {
+            pick("Service not ready — resolve the port conflict first.", "服务未就绪 — 请先解决端口冲突再接入。")
+        }
     }
 }
 

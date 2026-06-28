@@ -311,6 +311,42 @@ else
   FAIL=$((FAIL+1)); printf "  ${RED}✗ BUSYELF_LANGUAGE=zh 实例启动失败${RST}\n"
 fi
 
+group "端口黏住:钉死端口被占 → 不抢占、不漂移(冲突报错而非静默回退)"
+# 用 python http.server 占住一个端口,再让"钉死(env)到该端口"的 BusyElf 启动:
+# 它应绑定失败、不回退到候选端口、进程不崩(failHard 路径)。
+if command -v python3 >/dev/null; then
+  BUSY_PORT=18940
+  python3 -m http.server "$BUSY_PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
+  OCC_PID=$!
+  occ_ready=""
+  for _ in $(seq 1 25); do
+    curl -sS -m1 -o /dev/null "http://127.0.0.1:$BUSY_PORT/" 2>/dev/null && { occ_ready=1; break; }
+    sleep 0.2
+  done
+  if [ -z "$occ_ready" ]; then
+    printf "  ${DIM}· 跳过(占位端口未就绪)${RST}\n"
+  else
+    BUSYELF_DEBUG=1 BUSYELF_HTTP_PORT=$BUSY_PORT "$BIN" >/dev/null 2>&1 &
+    CONF_PID=$!
+    sleep 1.5
+    # 该端口仍是 python 占位(无 BusyElf 的 "blocking" 标记)→ BusyElf 没抢占
+    if curl -sS -m1 "http://127.0.0.1:$BUSY_PORT/debug/state" 2>/dev/null | grep -q '"blocking"'; then
+      FAIL=$((FAIL+1)); printf "  ${RED}✗ 钉死端口被占时 BusyElf 不应抢占${RST}\n"
+    else
+      PASS=$((PASS+1)); printf "  ${GREEN}✓${RST} 钉死端口被占 → BusyElf 未抢占该端口\n"
+    fi
+    if kill -0 "$CONF_PID" 2>/dev/null; then
+      PASS=$((PASS+1)); printf "  ${GREEN}✓${RST} 冲突实例存活未崩溃(failHard 而非崩/回退)\n"
+    else
+      FAIL=$((FAIL+1)); printf "  ${RED}✗ 冲突实例异常退出${RST}\n"
+    fi
+    kill "$CONF_PID" 2>/dev/null; wait "$CONF_PID" 2>/dev/null
+  fi
+  kill "$OCC_PID" 2>/dev/null; wait "$OCC_PID" 2>/dev/null
+else
+  printf "  ${DIM}· 跳过(无 python3)${RST}\n"
+fi
+
 group "容错:坏 body / 缺 id 仍 200 不崩、不影响状态"
 reset
 curl -sS -m3 -o /dev/null -w '' -X POST "$BASE/v1/task/start" -d 'not-json'

@@ -47,6 +47,20 @@ final class PopoverController: NSViewController {
     var listenAddressProvider: (() -> String?)?
     /// 由 AppDelegate 注入:用户在面板里切语言 → AppDelegate 持久化 + 刷新图标 tooltip + 回调 rebuildForLanguageChange。
     var onLanguageChange: ((AppConfig.Language) -> Void)?
+    /// 由 AppDelegate 注入:接入配方列表(harness 标签 + 现取端口生成的完整提示词),可扩展。
+    var setupRecipesProvider: (() -> [(label: String, prompt: String)])?
+    /// 由 AppDelegate 注入:关闭 popover(弹接入窗口前调,免 popover 挡住新窗口)。
+    var dismissPopover: (() -> Void)?
+
+    // 端口冲突横幅(默认隐藏)
+    private var bannerView: NSView!
+    private let bannerLabel = UI.label(size: 11)
+    private let bannerRetry = NSButton()
+    private let bannerChange = NSButton()
+    private var serverUnreachable = false
+    // 接入向导当前展示的配方(供复制按钮按 tag 取用)
+    private var currentRecipes: [(label: String, prompt: String)] = []
+    private static let docsURL = URL(string: "https://github.com/zjx20/BusyElf/blob/main/docs/SETUP.md")!
 
     private let contentWidth: CGFloat = 340
 
@@ -63,12 +77,15 @@ final class PopoverController: NSViewController {
         let header = makeHeader()
         let footer = makeFooter()
         buildList()
+        bannerView = makeBanner()
+        bannerView.isHidden = true   // 仅端口冲突时显示
         headerView = header
         footerView = footer
         sep1 = UI.separator()
         sep2 = UI.separator()
 
-        for v in [header, sep1!, scrollView, emptyView, sep2!, footer] {
+        // 横幅置顶(header 之上),端口冲突时出现。
+        for v in [bannerView!, header, sep1!, scrollView, emptyView, sep2!, footer] {
             root.addArrangedSubview(v)
             v.leadingAnchor.constraint(equalTo: root.leadingAnchor).isActive = true
             v.trailingAnchor.constraint(equalTo: root.trailingAnchor).isActive = true
@@ -140,6 +157,9 @@ final class PopoverController: NSViewController {
         timeoutRow?.refresh()
         updateListenAddress()
         overflowButton.toolTip = L.Footer.more   // header 不重建,单独刷新其语言相关 tooltip
+        bannerRetry.title = L.Banner.retry       // 横幅不重建,单独刷新其写死文案
+        bannerChange.title = L.Banner.changePort
+        refreshBannerText()
 
         // 保留"更多设置"展开态:用户正是在展开的更多设置里切的语言,别让它收起。
         showMore = wasShowingMore
@@ -245,7 +265,10 @@ final class PopoverController: NSViewController {
         // 分隔线高度固定不拉伸,用布局后的 frame(NSBox 的 fittingSize 可能为 0 会低估);
         // 内容区:非空 = listH(scrollView 显式高),空 = emptyView intrinsic。
         let contentH = sessions.isEmpty ? emptyView.fittingSize.height : listH
-        let total = (headerView.fittingSize.height
+        // 横幅默认隐藏(高度 0);可见时计入其 intrinsic 高(隐藏视图不被根 stack 计高,故手动求和)。
+        let bannerH = (bannerView?.isHidden == false) ? bannerView.fittingSize.height : 0
+        let total = (bannerH
+                     + headerView.fittingSize.height
                      + sep1.frame.height
                      + sep2.frame.height
                      + footerView.fittingSize.height
@@ -513,6 +536,9 @@ final class PopoverController: NSViewController {
             titleStack.leadingAnchor.constraint(equalTo: boltIcon.trailingAnchor, constant: 10),
             overflow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             overflow.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
+            // 显式点击区:ellipsis 字形本身极扁,不给尺寸的话命中区只有几像素高。
+            overflow.widthAnchor.constraint(equalToConstant: 30),
+            overflow.heightAnchor.constraint(equalToConstant: 28),
             titleStack.trailingAnchor.constraint(lessThanOrEqualTo: overflow.leadingAnchor, constant: -8),
         ])
         // 表头永不被根 stack 拉伸:有余高时摊给可滚动列表区,而不是把 bolt/标题顶到中间。
@@ -521,10 +547,92 @@ final class PopoverController: NSViewController {
         return container
     }
 
-    /// ⋯ overflow 菜单(低频项):版本号 + 关于。点击弹在按钮下方,而非直接跳转。
+    // MARK: - 端口冲突横幅
+
+    /// 服务不可达(端口被占)横幅:警示图标 + 文案 + [重试] / [改端口]。默认隐藏,`setServerUnreachable` 控制显隐。
+    private func makeBanner() -> NSView {
+        let icon = NSImageView()
+        icon.image = UI.symbol("exclamationmark.triangle.fill", size: 12)
+        icon.contentTintColor = .systemRed
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        bannerLabel.lineBreakMode = .byTruncatingTail
+
+        bannerRetry.title = L.Banner.retry
+        bannerRetry.bezelStyle = .rounded
+        bannerRetry.controlSize = .small
+        bannerRetry.target = self
+        bannerRetry.action = #selector(retryServer)
+        bannerRetry.setContentHuggingPriority(.required, for: .horizontal)
+
+        bannerChange.title = L.Banner.changePort
+        bannerChange.bezelStyle = .rounded
+        bannerChange.controlSize = .small
+        bannerChange.target = self
+        bannerChange.action = #selector(changePortFromBanner)
+        bannerChange.setContentHuggingPriority(.required, for: .horizontal)
+
+        let content = NSStackView(views: [icon, bannerLabel, UI.hSpacer(), bannerRetry, bannerChange])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSView()
+        row.wantsLayer = true
+        row.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.12).cgColor
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: row.topAnchor, constant: 8),
+            content.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -8),
+            content.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -16),
+        ])
+        row.setContentHuggingPriority(.required, for: .vertical)
+        row.setContentCompressionResistancePriority(.required, for: .vertical)
+        return row
+    }
+
+    /// 由 AppDelegate 在可达性变化时调用(主线程)。端口冲突 → 显示横幅 + 报错文案。
+    func setServerUnreachable(_ on: Bool) {
+        serverUnreachable = on
+        guard isViewLoaded else { return }   // 没建过 UI → 下次打开 ensurePopoverContent 会再喂一次
+        refreshBannerText()
+        bannerView.isHidden = !on
+        syncContentSize()
+    }
+
+    /// 刷新横幅"端口 N 被占用"文案(N=钉死的首选端口,即正在冲突的那个)。
+    private func refreshBannerText() {
+        bannerLabel.stringValue = L.Banner.unreachable(port: AppConfig.shared.preferredPort)
+    }
+
+    @objc private func retryServer() {
+        onRestartServer?()   // 可达性由 onReachabilityChange 回调驱动;这里只顺手延后刷新监听地址。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.updateListenAddress() }
+    }
+
+    @objc private func changePortFromBanner() {
+        // 展开"更多设置"并聚焦端口编辑(改端口=重新钉死,需重新复制接入指令)。
+        showMore = true
+        portRow?.refresh(); timeoutRow?.refresh(); updateListenAddress()
+        applyMoreState()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.portRow?.beginEdit() }
+    }
+
+    // MARK: - ⋯ overflow 菜单 / 接入向导
+
+    /// ⋯ overflow 菜单(低频项):接入 agent… + 版本号 + 关于。点击弹在按钮下方。
     @objc private func showOverflowMenu(_ sender: NSButton) {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        let setup = NSMenuItem(title: L.Menu.setup, action: #selector(showSetupGuide), keyEquivalent: "")
+        setup.target = self
+        menu.addItem(setup)
+        menu.addItem(.separator())
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         let versionItem = NSMenuItem(title: "BusyElf \(version)", action: nil, keyEquivalent: "")
@@ -537,6 +645,80 @@ final class PopoverController: NSViewController {
         menu.addItem(about)
 
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    /// 「接入 agent…」向导:每条配方一行(harness 标签 + [复制]),粘进用户自己的 agent 即自动配置。
+    /// 服务未就绪(端口冲突)时不给复制(提示词里的端口是错的),改提示先解决冲突。
+    @objc private func showSetupGuide() {
+        dismissPopover?()   // 先关 popover,否则它会挡住下面的接入窗口
+        currentRecipes = setupRecipesProvider?() ?? []
+        let ready = currentBoundPort() != nil
+
+        let alert = NSAlert()
+        alert.messageText = L.Setup.title
+        alert.informativeText = ready ? L.Setup.tutorial : L.Setup.notReady
+        alert.accessoryView = makeSetupAccessory(ready: ready)
+        alert.addButton(withTitle: L.Setup.viewDocs)
+        alert.addButton(withTitle: L.Setup.close)
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(Self.docsURL)
+        }
+    }
+
+    private func makeSetupAccessory(ready: Bool) -> NSView {
+        // 配方行 + 脚注竖排;整组相对上方说明文案左右缩进,读作其下级。
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 8
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        if ready {
+            for (i, r) in currentRecipes.enumerated() {
+                let label = UI.label(r.label, size: 12, weight: .medium)
+                let copy = NSButton(title: L.Setup.copy, target: self, action: #selector(copySetupRecipe(_:)))
+                copy.bezelStyle = .rounded
+                copy.controlSize = .small
+                copy.tag = i
+                copy.setContentHuggingPriority(.required, for: .horizontal)
+                let row = NSStackView(views: [label, UI.hSpacer(), copy])
+                row.orientation = .horizontal
+                row.alignment = .centerY
+                row.spacing = 12
+                row.translatesAutoresizingMaskIntoConstraints = false
+                rows.addArrangedSubview(row)
+                row.leadingAnchor.constraint(equalTo: rows.leadingAnchor).isActive = true
+                row.trailingAnchor.constraint(equalTo: rows.trailingAnchor).isActive = true
+            }
+            let footnote = UI.label(L.Setup.moreComing, size: 10, color: .tertiaryLabelColor, truncates: false)
+            rows.addArrangedSubview(footnote)
+        }
+
+        // 外层容器:固定宽度撑起 alert 文本列;内部左右各缩进 22pt,使按钮组窄于上方文案 → 视觉从属。
+        let width: CGFloat = 360, indent: CGFloat = 22
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(rows)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: width),
+            rows.topAnchor.constraint(equalTo: container.topAnchor),
+            rows.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            rows.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: indent),
+            rows.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -indent),
+        ])
+        container.layoutSubtreeIfNeeded()
+        container.frame = NSRect(origin: .zero, size: NSSize(width: width, height: rows.fittingSize.height))
+        return container
+    }
+
+    @objc private func copySetupRecipe(_ sender: NSButton) {
+        let i = sender.tag
+        guard i >= 0, i < currentRecipes.count else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(currentRecipes[i].prompt, forType: .string)
+        sender.title = L.Setup.copied   // 短暂反馈,1.2s 后还原
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak sender] in sender?.title = L.Setup.copy }
     }
 
     private func buildList() {
@@ -827,6 +1009,9 @@ private final class SettingFieldRow: NSView, NSTextFieldDelegate {
         valueLabel.stringValue = displayText(read())
         setEditing(false)
     }
+
+    /// 外部触发进入编辑态(端口冲突横幅「改端口」用)。
+    func beginEdit() { setEditing(true) }
 
     private func displayText(_ raw: String) -> String {
         suffix.map { "\(raw) \($0)" } ?? raw

@@ -121,7 +121,8 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 
 - 注释用**中文**,与现有风格一致;命名/缩进/惯用法贴合周边代码。
 - **发布**走免开发者账号的 ad-hoc 路线(`scripts/ci-package.sh` + `.github/workflows/release.yml`):矩阵 `arm64+x86_64`、各出 zip/dmg、单 release job 汇总(`docs/BUILD.md`)。`ci-package.sh` 本地可复现一条腿。用户需一次性放行 Gatekeeper(右键打开在 Sequoia/Tahoe 已失效)。升级到 Developer ID 签名+公证见 BUILD.md。图标:源 `design/AppIcon.svg` → `scripts/make-icon.sh` → `Resources/AppIcon.icns`(`CFBundleIconFile` 引用)。
-- 端口默认 `17872`(可经 `defaults write elf.busyelf httpPort N` 改),被占用回退 `17873/17874/17875`(`LoopbackServer.candidatePorts(preferred:)`,首选端口在前);右键菜单显示实际监听地址。适配器 URL 写死默认端口,文档已提示回退。
+- **端口黏住(sticky)**:首启探测(首选 `17872` → 候选 `17873/74/75` → 实在没有就 `port 0` 让系统分配),**绑成功后把实际端口持久化钉死**(`AppConfig.persistBoundPort`/`isPortPinned`,键 `portPinned`);此后每次只绑这个端口、**冲突即报错不漂移**(`LoopbackServer.failHard` → `onReachabilityChange(false)` → 菜单栏红角标半透明 + popover 顶部横幅 [重试]/[改端口])。`.ready` 必须从 `listener.port` 取真实端口(`port 0` 退化时尤甚)。这样适配器里写死的端口长期稳定有效。`defaults write elf.busyelf httpPort N` 或面板改端口=重新钉死(需重新复制接入指令)。**调试模式(`BUSYELF_DEBUG=1`)与 env 覆盖(`BUSYELF_HTTP_PORT`)都不持久化、且 debug 忽略已钉死端口**——测试与用户真实 defaults 互不污染。
+- **onboarding(接入提示词)**:popover ⋯ →「接入 agent…」弹 `NSAlert`,每条配方一行(标签 + 复制按钮),`AppDelegate` 注入 `setupRecipesProvider`。`ClaudeHookEvent.installPrompt(port:)` 出 Claude 专属版(原生 `type:"http"` hooks,端口现取);`GenericSetupPrompt.installPrompt(port:)` 出中立 `/v1/task/*` 版(无 Claude 字样)。BusyElf 不碰用户文件,由用户自己的 agent 幂等合并进 `settings.json`。加新 harness=数组里加一条配方。
 - 默认仅 loopback;右键菜单可切「监听所有网口 (0.0.0.0)」(`AppConfig.listenOnAllInterfaces` + `server.restart()`),无鉴权,仅可信网络用。
 - 仅 loopback 可达、**无鉴权**(纯本机同用户场景,刻意从简)。
 - 提交信息/PR 按用户要求再做;默认分支上动手前先开分支。

@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverController: PopoverController?   // 懒加载,纯 AppKit
     private var latestSessions: [TaskSession] = []      // 给首次创建的 popover 喂初值
     private var server: LoopbackServer!
+    private var serverReachable = true                  // 服务是否可达(端口冲突时 false → 菜单栏/横幅报错)
 
     // MARK: - 生命周期
 
@@ -61,7 +62,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "\(AppConfig.shared.listenOnAllInterfaces ? "0.0.0.0" : "127.0.0.1"):\(p)"
         }
         controller.onLanguageChange = { [weak self] lang in self?.applyLanguage(lang) }
+        // 接入配方(可扩展):每条 = 一个 harness 标签 + 现取实际端口生成的完整提示词。
+        // 以后支持新 harness 就在数组里加一条;PopoverController 只按数组渲染行,不识别具体 harness。
+        controller.setupRecipesProvider = { [weak self] in
+            let p = self?.server?.port ?? 0
+            return [
+                ("Claude Code", ClaudeHookEvent.installPrompt(port: p)),
+                (L.Setup.otherHarness, GenericSetupPrompt.installPrompt(port: p)),
+            ]
+        }
+        controller.dismissPopover = { [weak self] in self?.popover.performClose(nil) }
         controller.update(sessions: latestSessions)   // 喂入当前快照
+        controller.setServerUnreachable(!serverReachable)   // 反映当前可达态(可能在 popover 建立前就已不可达)
         popover.contentViewController = controller
         popoverController = controller
     }
@@ -87,6 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startServer() {
         let router = Router(store: .shared)
         server = LoopbackServer(router: router)
+        // 端口冲突/绑定失败 → 主线程回调:菜单栏角标变红半透明 + popover 顶部横幅报错。
+        server.onReachabilityChange = { [weak self] ok in
+            guard let self else { return }
+            self.serverReachable = ok
+            self.refreshStatus(self.latestSessions)
+            self.popoverController?.setServerUnreachable(!ok)
+        }
         server.start()
     }
 
@@ -109,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let waiting = sessions.filter { $0.status == .waiting }.count
         let badge = StatusBadge(
             hasUnseenFailed: sessions.contains { $0.status == .failed && !$0.seen },
-            hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen })
+            hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen },
+            serverUnreachable: !serverReachable)
         statusController.refresh(workingCount: working, waitingCount: waiting, badge: badge)
     }
 

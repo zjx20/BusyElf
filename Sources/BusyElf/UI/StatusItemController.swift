@@ -1,11 +1,15 @@
 import AppKit
 
-/// 菜单栏角标聚合:有未看失败 → 红点(优先);否则有未看完成 → 绿点;否则无。
+/// 菜单栏角标聚合:服务不可达(端口冲突)→ 红点(最高优先);否则有未看失败 → 红点;
+/// 否则有未看完成 → 绿点;否则无。服务不可达另压暗整体透明度以区别于"任务失败红点"。
 struct StatusBadge {
     var hasUnseenFailed: Bool = false
     var hasUnseenDone: Bool = false
-    /// 角标颜色:红优先于绿。
+    /// 服务彻底不可达(端口被占用/绑定失败):应大声可见,提示用户去解决。
+    var serverUnreachable: Bool = false
+    /// 角标颜色:不可达红 > 失败红 > 完成绿。
     var dotColor: NSColor? {
+        if serverUnreachable { return .systemRed }
         if hasUnseenFailed { return .systemRed }
         if hasUnseenDone { return .systemGreen }
         return nil
@@ -72,7 +76,8 @@ final class StatusItemController {
             return
         }
 
-        button.alphaValue = 1.0
+        // 服务不可达时压暗整体(红角标 + 半透明),与"任务失败红点(满亮)"区别开。
+        button.alphaValue = badge.serverUnreachable ? 0.6 : 1.0
         button.contentTintColor = nil
         button.toolTip = Self.tooltip(working: workingCount, waiting: waitingCount, badge: badge)
 
@@ -129,6 +134,7 @@ final class StatusItemController {
     }
 
     private static func tooltip(working: Int, waiting: Int, badge: StatusBadge) -> String {
+        if badge.serverUnreachable { return "BusyElf · " + L.Tip.unreachable }
         var parts: [String] = []
         if working > 0 { parts.append(L.Tip.working(working)) }
         if waiting > 0 { parts.append(L.Tip.waiting(waiting)) }

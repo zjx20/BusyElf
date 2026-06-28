@@ -24,6 +24,25 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(AppConfig.resolvePort(env: "0", stored: 12345), AppConfig.defaultPort)    // env 越界 → 默认
     }
 
+    func testResolvePinned() {
+        // 首启:无 env、非调试、未持久化 → 不钉死(走探测/回退)
+        XCTAssertFalse(AppConfig.resolvePinned(envOverridden: false, debug: false, storedPinned: false))
+        // 首启绑定后持久化 → 钉死(此后精确绑定)
+        XCTAssertTrue(AppConfig.resolvePinned(envOverridden: false, debug: false, storedPinned: true))
+        // env 覆盖(测试)→ 永远钉死,无视持久化
+        XCTAssertTrue(AppConfig.resolvePinned(envOverridden: true, debug: false, storedPinned: false))
+        // 调试模式 → 忽略已持久化的钉死(测试隔离),除非 env 显式钉
+        XCTAssertFalse(AppConfig.resolvePinned(envOverridden: false, debug: true, storedPinned: true))
+        XCTAssertTrue(AppConfig.resolvePinned(envOverridden: true, debug: true, storedPinned: false))
+    }
+
+    func testShouldPersistBoundPort() {
+        XCTAssertTrue(AppConfig.shouldPersistBoundPort(envOverridden: false, debug: false))   // 生产首启 → 持久化钉死
+        XCTAssertFalse(AppConfig.shouldPersistBoundPort(envOverridden: true, debug: false))   // env 覆盖 → 不写
+        XCTAssertFalse(AppConfig.shouldPersistBoundPort(envOverridden: false, debug: true))   // 调试 → 不写(不污染)
+        XCTAssertFalse(AppConfig.shouldPersistBoundPort(envOverridden: true, debug: true))
+    }
+
     func testResolveListenAll() {
         XCTAssertFalse(AppConfig.resolveListenAll(env: nil, stored: false))
         XCTAssertTrue(AppConfig.resolveListenAll(env: nil, stored: true))

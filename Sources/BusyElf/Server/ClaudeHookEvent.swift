@@ -202,6 +202,67 @@ struct ClaudeHookEvent {
         }
     }
 
+    // MARK: - 接入提示词(onboarding)
+
+    /// 写进 hooks 的全部事件(与上面 parse 的 switch 一一对应)。
+    static let hookEvents = [
+        "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+        "MessageDisplay", "Notification", "PermissionRequest", "SubagentStart",
+        "SubagentStop", "Stop", "StopFailure", "SessionEnd",
+    ]
+
+    /// 给 Claude Code 的"一键接入"提示词(端口现取实际值填好)。用户从 popover ⋯「接入 agent…」复制,
+    /// 粘进自己的 Claude Code,由它幂等合并进 `~/.claude/settings.json`。BusyElf 全程不碰用户文件。
+    /// 用 Claude 原生 `type:"http"` hook(无需 jq/curl);端口已钉死稳定,贴进去后长期有效。
+    static func installPrompt(port: UInt16) -> String {
+        let url = "http://127.0.0.1:\(port)/claude/hooks"
+        let lines = hookEvents.map {
+            "    \"\($0)\": [{ \"hooks\": [{ \"type\": \"http\", \"url\": \"\(url)\", \"timeout\": 5 }] }]"
+        }.joined(separator: ",\n")
+        let hooksJSON = "{\n  \"hooks\": {\n\(lines)\n  }\n}"
+        return """
+        # Connect BusyElf to Claude Code
+
+        BusyElf is a passive macOS menubar app that blocks system sleep while an agent is \
+        working and shows each task's status. It only *observes* Claude Code through hooks — \
+        it never changes your prompts, tools, or flow. Configure the hooks below so it can see activity.
+
+        ## Steps
+        1. Pick where to install, then open that file (create it containing `{}` if missing):
+           - **User-level** `~/.claude/settings.json` — applies to every project. Most convenient; recommended.
+           - **Project-level** `<this-project>/.claude/settings.local.json` — only this project, personal & \
+        git-ignored (use `<this-project>/.claude/settings.json` instead if you want to commit it for the team). \
+        Choose this if you only want BusyElf for the current project. Ask the user which they prefer if unsure.
+        2. **Back it up first**: copy it alongside as `<the-file>.busyelf-backup`.
+        3. **Merge** the `hooks` block below into that file:
+           - If there is no `hooks` key, add it.
+           - If `hooks` already exists, merge per event: keep the user's existing entries and add \
+        BusyElf's. If a BusyElf entry is already there (an `http` hook whose `url` ends with \
+        `/claude/hooks`, possibly on a different port), **replace it in place** — so this is safe to re-run.
+           - Never remove or alter the user's other (non-BusyElf) hooks.
+        4. Save valid JSON.
+
+        ```json
+        \(hooksJSON)
+        ```
+
+        ## Verify
+        Post a one-off test task — it starts, then completes, so a finished item shows up in BusyElf:
+        ```
+        curl -sS -m2 -X POST \(url) -d '{"hook_event_name":"UserPromptSubmit","session_id":"busyelf-setup-test","prompt":"🎉 BusyElf connected — open this panel to see how tasks show up."}'
+        curl -sS -m2 -X POST \(url) -d '{"hook_event_name":"Stop","session_id":"busyelf-setup-test","last_assistant_message":"Setup looks good. From now on, while an agent is working your Mac will not idle-sleep. This is a one-off test task — it clears itself once you close this panel."}'
+        ```
+        Then tell the user: click the BusyElf ⚡ in the menubar — they should see a completed test task \
+        (green dot) with the message above. Opening the panel marks it read; closing the panel removes it \
+        automatically (BusyElf keeps finished tasks only until you've seen them). If the curl cannot connect, \
+        BusyElf is not running or is on a different port — ask the user to launch BusyElf and re-open this setup.
+
+        Notes:
+        - All events point to the same URL; BusyElf routes internally by event name.
+        - BusyElf always replies 2xx with an empty body, so these hooks never block or alter Claude Code.
+        """
+    }
+
     // MARK: - 私有
 
     /// 取字符串字段;数字也强转字符串。缺失/类型不符 → nil。

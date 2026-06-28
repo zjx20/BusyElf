@@ -21,8 +21,15 @@ final class AppConfig {
 
     /// 任务无活动超过它就视为"可能已断",不再阻止休眠(看门狗)。可经面板运行期改并持久化。
     private(set) var inactivityTimeout: TimeInterval
-    /// HTTP 首选端口(被占用仍按候选表回退)。可经面板运行期改并持久化(改后需重启监听)。
+    /// HTTP 首选端口。首启探测(候选表回退 / port 0)选定后即"钉死"持久化,此后只绑这个端口(冲突报错不漂移)。
+    /// 可经面板运行期改并持久化(改后需重启监听);改端口=重新钉死。
     private(set) var preferredPort: UInt16
+    /// 端口是否被环境变量(`BUSYELF_HTTP_PORT`)覆盖。env 覆盖时按"精确绑定"语义、且**不回写持久化**,
+    /// 供测试完全无视用户 defaults 里钉死的端口、保持确定性。
+    let portEnvOverridden: Bool
+    /// 是否调试/测试模式(`BUSYELF_DEBUG=1`)。调试实例**既不持久化端口、也不读取用户已钉死的端口**,
+    /// 与用户真实 defaults 完全隔离(E2E 测试实例都带此 env,不污染、不受污染)。生产(无此 env)正常持久化。
+    let debugMode: Bool
     /// 是否监听所有网口(0.0.0.0)。可经面板/右键菜单运行期切换并持久化。
     private(set) var listenOnAllInterfaces: Bool
     /// 界面语言(用户选择)。可经面板运行期切换并持久化。读有效二态用 `effectiveLanguage`。
@@ -43,6 +50,8 @@ final class AppConfig {
             Keys.language: Language.auto.rawValue,
         ])
         let env = ProcessInfo.processInfo.environment
+        portEnvOverridden = env["BUSYELF_HTTP_PORT"] != nil
+        debugMode = env["BUSYELF_DEBUG"] == "1"
         inactivityTimeout = Self.resolveTimeout(
             env: env["BUSYELF_INACTIVITY_TIMEOUT"], stored: defaults.double(forKey: Keys.inactivityTimeout))
         preferredPort = Self.resolvePort(
@@ -59,12 +68,34 @@ final class AppConfig {
         defaults.set(on, forKey: Keys.listenAll)
     }
 
+    /// 端口是否"已钉死"——应只绑 `preferredPort`、冲突即报错、不回退。
+    /// env 覆盖(测试)或首启成功绑定后(`persistBoundPort`)/ 用户显式改端口(`setPreferredPort`)即为 true;
+    /// 调试模式忽略已持久化的钉死,保持测试隔离。
+    var isPortPinned: Bool {
+        Self.resolvePinned(envOverridden: portEnvOverridden, debug: debugMode, storedPinned: defaults.bool(forKey: Keys.portPinned))
+    }
+
+    /// 是否应把成功绑定的端口持久化钉死。env 覆盖 / 调试模式都不持久化(不污染用户 defaults)。
+    var shouldPersistBoundPort: Bool {
+        Self.shouldPersistBoundPort(envOverridden: portEnvOverridden, debug: debugMode)
+    }
+
+    /// 首启探测成功绑定后调用:把实际端口钉死持久化,此后每次只绑它。
+    /// 仅当 `shouldPersistBoundPort` 为真时由调用方调用,以免污染用户 defaults。幂等。
+    func persistBoundPort(_ port: UInt16) {
+        preferredPort = port
+        defaults.set(Int(port), forKey: Keys.httpPort)
+        defaults.set(true, forKey: Keys.portPinned)
+    }
+
     /// UI 改端口后持久化(合法 1...65535 才接受;改后调用方需重启监听)。返回是否被接受。
+    /// 用户显式选端口=钉死(此后精确绑定、冲突报错),需重新复制接入指令。
     @discardableResult
     func setPreferredPort(_ port: Int) -> Bool {
         guard port >= 1 && port <= 65535 else { return false }
         preferredPort = UInt16(port)
         defaults.set(port, forKey: Keys.httpPort)
+        defaults.set(true, forKey: Keys.portPinned)
         return true
     }
 
@@ -130,6 +161,16 @@ final class AppConfig {
         return (raw >= 1 && raw <= 65535) ? UInt16(raw) : defaultPort
     }
 
+    /// 端口是否钉死(纯逻辑,便于单测):env 覆盖 → 钉死;调试模式 → 忽略已存钉死;否则看持久化标志。
+    static func resolvePinned(envOverridden: Bool, debug: Bool, storedPinned: Bool) -> Bool {
+        envOverridden || (!debug && storedPinned)
+    }
+
+    /// 成功绑定后是否应持久化端口(纯逻辑):env 覆盖 / 调试模式都不持久化。
+    static func shouldPersistBoundPort(envOverridden: Bool, debug: Bool) -> Bool {
+        !envOverridden && !debug
+    }
+
     static func resolveListenAll(env: String?, stored: Bool) -> Bool {
         envBool(env) ?? stored
     }
@@ -139,6 +180,7 @@ final class AppConfig {
     private enum Keys {
         static let inactivityTimeout = "inactivityTimeoutSeconds"
         static let httpPort = "httpPort"
+        static let portPinned = "portPinned"   // 故意不进 register:未设即 false → 区分"首启探测"与"已钉死"
         static let listenAll = "listenAllInterfaces"
         static let language = "language"
     }

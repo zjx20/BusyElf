@@ -18,17 +18,32 @@ final class LoopbackServer {
     /// 单连接最多读多少字节的 body,超出直接丢弃(防被本机恶意进程撑爆内存)。
     private let maxBodyBytes = 1 << 20   // 1 MiB
 
-    /// 内建回退端口表(首选端口由 AppConfig 提供,排在最前)。
+    /// 内建回退端口表(首选端口由 AppConfig 提供,排在最前)。仅"首启探测"(端口未钉死)时用。
     private static let fallbackPorts: [UInt16] = [17872, 17873, 17874, 17875]
     /// 本次启动实际尝试的候选端口序列,在 `start()` 时按配置算定。
     private var candidatePorts: [UInt16] = []
+    /// 本次启动是否已尝试过"系统分配的临时端口"(port 0),防候选耗尽后重复退化。
+    private var triedEphemeral = false
+
+    /// 服务可达性变化时在主线程回调一次(true=已绑定可达,false=端口被占/连临时端口都失败,彻底不可达)。
+    /// 只在状态跳变时回调(去抖),不轮询 → 不破坏 idle 0 CPU。供 UI 把端口冲突显示成"看得见的错误"。
+    var onReachabilityChange: ((Bool) -> Void)?
+    private var lastReachable: Bool?   // 去抖:仅在跳变时回调
 
     init(router: Router) {
         self.router = router
     }
 
     func start() {
-        candidatePorts = Self.candidatePorts(preferred: AppConfig.shared.preferredPort)
+        // 端口已钉死(首启探测过 / env 覆盖 / 用户显式设过)→ 只绑这一个,冲突即报错不回退;
+        // 否则首启探测:按候选表回退,全占则退化到系统分配的临时端口(port 0)。
+        if AppConfig.shared.isPortPinned {
+            candidatePorts = [AppConfig.shared.preferredPort]
+        } else {
+            candidatePorts = Self.candidatePorts(preferred: AppConfig.shared.preferredPort)
+        }
+        triedEphemeral = false
+        lastReachable = nil   // 重启后允许"就绪"再次回调 true
         startListener(candidateIndex: 0)
     }
 
@@ -62,7 +77,15 @@ final class LoopbackServer {
 
     private func startListener(candidateIndex index: Int) {
         guard index < candidatePorts.count else {
-            NSLog("BusyElf: 所有候选端口均不可用,服务端未启动")
+            // 候选端口耗尽。未钉死(首启探测)→ 退化到系统分配的临时端口(port 0),拿到端口后即钉死;
+            // 已钉死(端口被占)/ 连临时端口都失败 → 真失败,大声报错让 UI 可见。
+            if !AppConfig.shared.isPortPinned && !triedEphemeral {
+                triedEphemeral = true
+                NSLog("BusyElf: 候选端口全部占用,改用系统分配的临时端口")
+                startEphemeralListener()
+            } else {
+                failHard()
+            }
             return
         }
         let portNumber = candidatePorts[index]
@@ -87,8 +110,7 @@ final class LoopbackServer {
             guard let self else { return }
             switch state {
             case .ready:
-                self.port = portNumber
-                NSLog("BusyElf: 监听 \(allInterfaces ? "0.0.0.0" : "127.0.0.1"):\(portNumber)")
+                self.bound(listener: listener, intendedPort: portNumber, allInterfaces: allInterfaces)
             case .failed(let error):
                 NSLog("BusyElf: 端口 \(portNumber) 监听失败: \(error);回退")
                 listener.cancel()
@@ -103,6 +125,65 @@ final class LoopbackServer {
         }
         listener.start(queue: queue)
         self.listener = listener
+    }
+
+    /// 候选端口耗尽后的最后退化:用系统分配的空闲端口(等价 port 0)。仅首启探测路径走到这里。
+    /// `.ready` 后从 `listener.port` 取系统选中的真实端口并钉死;失败=真失败。
+    private func startEphemeralListener() {
+        let allInterfaces = AppConfig.shared.listenOnAllInterfaces
+        let params = Self.makeParameters(allInterfaces: allInterfaces)
+        let listener: NWListener
+        do {
+            // 不指定端口 = 让系统分配一个空闲端口。
+            listener = try NWListener(using: params)
+        } catch {
+            NSLog("BusyElf: 创建临时端口监听失败: \(error)")
+            failHard()
+            return
+        }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.bound(listener: listener, intendedPort: 0, allInterfaces: allInterfaces)
+            case .failed(let error):
+                NSLog("BusyElf: 临时端口监听失败: \(error)")
+                listener.cancel()
+                if self.listener === listener { self.listener = nil }
+                self.failHard()   // 连临时端口都失败 = 真失败
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection)
+        }
+        listener.start(queue: queue)
+        self.listener = listener
+    }
+
+    /// 绑定成功收尾:以 `listener.port` 为准取真实端口(端口 0 退化时 intendedPort=0,必须问 listener 要 OS 选中值),
+    /// 记 `port`、首启把它钉死持久化(env 覆盖时不写,保测试干净)、回调可达。
+    private func bound(listener: NWListener, intendedPort: UInt16, allInterfaces: Bool) {
+        let real = listener.port?.rawValue ?? intendedPort
+        port = real
+        if AppConfig.shared.shouldPersistBoundPort { AppConfig.shared.persistBoundPort(real) }
+        notifyReachability(true)
+        NSLog("BusyElf: 监听 \(allInterfaces ? "0.0.0.0" : "127.0.0.1"):\(real)")
+    }
+
+    /// 彻底不可达(钉死端口被占 / 连临时端口都失败)。置 port=0 并发"不可达"信号供 UI 报错。
+    private func failHard() {
+        port = 0
+        NSLog("BusyElf: 端口 \(AppConfig.shared.preferredPort) 不可用(可能被占用),服务端未启动")
+        notifyReachability(false)
+    }
+
+    /// 可达性回调(去抖、回主线程)。`stop()` 不调用(主动停止 ≠ 故障)。
+    private func notifyReachability(_ ok: Bool) {
+        guard lastReachable != ok else { return }
+        lastReachable = ok
+        DispatchQueue.main.async { [weak self] in self?.onReachabilityChange?(ok) }
     }
 
     // MARK: - 连接处理
