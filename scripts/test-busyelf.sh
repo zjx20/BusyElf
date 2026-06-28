@@ -120,6 +120,24 @@ expect "复活后重新阻止休眠" ".blocking" "true"
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"T","prompt":"下一轮"}'
 expect "新 turn → 清钩" "$(fld T toolComplete)" "false"
 
+group "阻塞等用户:AskUserQuestion / ExitPlanMode 的 PreToolUse → waiting(放行休眠+点亮关注)"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"AQ","cwd":"/p","prompt":"问我点啥"}'
+expect "start → 阻止休眠" ".blocking" "true"
+hook '{"hook_event_name":"PreToolUse","session_id":"AQ","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"要不要继续?","header":"确认"}]}}'
+expect "AskUserQuestion PreToolUse → waiting(不靠 Notification)" "$(st AQ)" "waiting"
+expect "等用户期间放行休眠" ".blocking" "false"
+expect "提示文案取第一个问题文本" "$(fld AQ waitingMessage)" "要不要继续?"
+hook '{"hook_event_name":"PostToolUse","session_id":"AQ","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"要不要继续?"}],"answers":{"要不要继续?":"是"}}}'
+expect "用户应答 PostToolUse → 复活 working" "$(st AQ)" "working"
+expect "复活后重新阻止休眠" ".blocking" "true"
+hook '{"hook_event_name":"PreToolUse","session_id":"AQ","tool_name":"ExitPlanMode","tool_input":{"plan":"第一步...第二步..."}}'
+expect "ExitPlanMode PreToolUse → waiting" "$(st AQ)" "waiting"
+expect "等批准计划期间放行休眠" ".blocking" "false"
+expect "ExitPlanMode 固定提示文案" "$(fld AQ waitingMessage)" "等待批准计划"
+hook '{"hook_event_name":"PreToolUse","session_id":"AQ","tool_name":"Bash","tool_input":{"command":"ls"}}'
+expect "对照:普通工具 Bash 不进 waiting" "$(st AQ)" "working"
+
 group "PostToolUseFailure:工具失败 → 打 ✗(仍 working,非终态)"
 reset
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"TF","cwd":"/p","prompt":"跑测试"}'

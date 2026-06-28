@@ -119,7 +119,7 @@ BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PRO
 | `remove` | 移除(幂等,级联子任务) | 用户主动清理 |
 
 > 终态(done/failed)留在字典里供展示,**不阻止休眠**,靠 seen 生命周期清理:popover 打开标 seen(清角标)、关闭后 purge(下次打开消失),并有 TTL/数量上限兜底。
-> 对 Claude Code 的体现:`Stop`→done(完成提示)、`StopFailure`→fail(失败提示)、`SubagentStart/Stop`→子任务。permission vs idle 通知靠**读 `notification_type`** 区分(见下)。
+> 对 Claude Code 的体现:`Stop`→done(完成提示)、`StopFailure`→fail(失败提示)、`SubagentStart/Stop`→子任务。permission vs idle 通知靠**读 `notification_type`** 区分(见下)。阻塞等用户的 `AskUserQuestion`/`ExitPlanMode` 不发 Notification,适配器在其 `PreToolUse` 阶段翻成 `wait`(否则任务会卡 working 误挡休眠)。
 
 幂等设计的原因:事件投递是 at-least-once 且可能丢失。用集合成员而非 `+1/-1` 整数计数器——整数会漂移成负数或卡在正数从而**永久阻止休眠**,这是本应用绝不能有的 bug。
 

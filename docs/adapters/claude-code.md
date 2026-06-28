@@ -14,6 +14,7 @@
 | `UserPromptSubmit` | `start` | 用户提交 prompt → 一个 turn 开始 = 在干活 |
 | `SubagentStart` | `start`(子任务) | subagent 生成 → 独立子任务(`agent_id` 折进 id,`parentId`=session,`name`=agent_type) |
 | `PreToolUse` | `update`(`toolComplete:false`) | 工具即将执行 → 即时显示"正在做的工具"(不等做完) |
+| `PreToolUse`(`AskUserQuestion`/`ExitPlanMode`) | `wait` | **例外**:这俩工具阻塞等用户回答/批准,且**不发任何 Notification** → 进 waiting + 放行休眠 + 点亮关注;应答后的 `PostToolUse` 自然复活 working |
 | `PostToolUse` | `update`(`toolComplete:true`) | 工具执行完 → 动作行打 ✓;也是"等待/完成后恢复"的信号 |
 | `PostToolUseFailure` | `update`(`toolFailed:true`) | 工具执行失败 → 动作行打 ✗(`error`→`toolError` 作 tooltip);失败是常态、非任务中断,仍 `working` |
 | `MessageDisplay` | `update`(reply) | 助手文本流式输出 → 实时回复(`delta`,replace/append) |
@@ -31,6 +32,8 @@
 **读 `notification_type` 区分 permission vs idle**(原先靠时序区分;现因终态留存、`wait` 改为总是创建,时序不再可靠,故显式读字段——官方已稳定提供):
 - `permission_prompt`(turn 进行中需授权)→ `wait` → 标记 waiting + 提醒。
 - `idle_prompt`(答完在等下一句)/ 其它类型 → **忽略**,不产生幽灵等待项。
+
+**AskUserQuestion / ExitPlanMode 走 `PreToolUse` 而非 Notification**:权威文档与实测均确认,这两个"阻塞等用户交互"的内建工具**不发任何 `Notification`**(只发 `Pre`/`PostToolUse`)。若仍按普通工具当 `update→working`,任务会在等用户的整段时间里卡 `working`、误挡休眠、不点亮关注(曾经的 bug)。故适配器在 `PreToolUse` 阶段对这两个 `tool_name` 翻成 `wait`:进 waiting + 放行休眠 + 提醒;`waitingMessage` 取第一个问题文本(ExitPlanMode 固定为"等待批准计划")。用户应答后的 `PostToolUse` 走 `update→working` 自动复活——与 `permission_prompt` 的 wait→复活同一条路径。注意 `Notification` 的 `elicitation_dialog` 是 **MCP 服务器** 的 elicitation,与内建的 AskUserQuestion 无关。
 
 **subagent**:在 subagent 内触发的事件带 `agent_id`(区分主线程 vs 子任务)+ `agent_type`(名字)。BusyElf 把 `agent_id` 折进 task id(`session#agent_id`),`parentId`=session,于是子任务作为独立行挂在父任务下。`SubagentStart`→建子任务,`SubagentStop`→子任务完成。
 

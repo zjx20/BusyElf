@@ -68,6 +68,17 @@ struct Router {
 
     /// 把一条 Claude hook 原始 payload 翻成中立动作并落到 TaskStore。无 id 则忽略。
     private func routeClaude(body: Data) {
+        // 调试插桩(仅 BUSYELF_DEBUG=1):打印每条 hook 的原始 body + 解析出的中立动作 + 折叠 id,
+        // 看清"事件流 → 动作"映射。NSLog 自带毫秒时间戳;生产环境(debugEnabled=false)一行不打。
+        if Self.debugEnabled {
+            let raw = String(decoding: body, as: UTF8.self)
+            let shown = raw.count > 1200 ? String(raw.prefix(1200)) + "…(\(raw.count)B)" : raw
+            if let h = ClaudeHookEvent.parse(body) {
+                NSLog("[busyelf hook] action=%@ id=%@ ← %@", String(describing: h.action), h.id ?? "nil", shown)
+            } else {
+                NSLog("[busyelf hook] action=PARSE_FAIL(非JSON对象) ← %@", shown)
+            }
+        }
         guard let hook = ClaudeHookEvent.parse(body),
               let id = hook.id, !id.isEmpty else { return }
         let agent = ClaudeHookEvent.agentLabel

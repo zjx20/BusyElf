@@ -14,6 +14,7 @@ import Foundation
 ///   - `UserPromptSubmit` → start   (一个 turn 开始 = 在干活)
 ///   - `SubagentStart`    → start    (子任务开始;agent_id 折进 id,parentId=session_id,name=agent_type)
 ///   - `PreToolUse`       → update  (工具即将执行 → 即时显示"正在做的工具",toolComplete=false)
+///                          例外:AskUserQuestion / ExitPlanMode 阻塞等用户交互 → wait(它们不发 Notification,只发 Pre/PostToolUse)
 ///   - `PostToolUse`      → update  (工具已完成 → toolComplete=true 打 ✓;也是 waiting/终态→working 的恢复信号)
 ///   - `PostToolUseFailure` → update (工具失败 → toolFailed=true 打 ✗;失败是常态非终态,仍 working;error 进 toolError 作 tooltip)
 ///   - `MessageDisplay`   → update  (助手实时回复 delta → reply,replace/append)
@@ -86,11 +87,21 @@ struct ClaudeHookEvent {
             action = .start(prompt: nil)
 
         case "PreToolUse":
-            // 工具即将执行:同 PostToolUse 取工具名 + 细节,但标 toolComplete=false(进行中)。
-            // 让 popover 即时显示"正在做的工具",而非 PostToolUse 那个"刚做完"的滞后画面。
             let tool = Self.string(dict, "tool_name")
-            let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
-            action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false, toolComplete: false)
+            let input = dict["tool_input"] as? [String: Any]
+            if tool == "AskUserQuestion" || tool == "ExitPlanMode" {
+                // 这俩是"阻塞等用户交互"类工具:Claude 调用后挂起、等用户回答/批准,期间**不发任何
+                // Notification**(权威文档确认,实测事件流亦零 Notification),只发 Pre/PostToolUse。
+                // 若按普通工具 update→working,任务会在等用户的整段时间里卡 working → 误挡休眠、不点亮
+                // "需要关注"。故把它们的 PreToolUse 翻成 wait:进 waiting + 放行休眠 + 提醒;用户应答后的
+                // PostToolUse 自然走 update→working 复活(与 permission_prompt 的 wait→复活同一条成熟路径)。
+                action = .wait(message: Self.blockingToolPrompt(tool: tool, input: input))
+            } else {
+                // 普通工具即将执行:同 PostToolUse 取工具名 + 细节,但标 toolComplete=false(进行中)。
+                // 让 popover 即时显示"正在做的工具",而非 PostToolUse 那个"刚做完"的滞后画面。
+                let detail = Self.toolDetail(input)
+                action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false, toolComplete: false)
+            }
 
         case "PostToolUse":
             // 工具名铁实;细节按工具形状尽力取(Bash 看 command,Edit/Write/Read 看 file_path,等)。
@@ -156,6 +167,16 @@ struct ClaudeHookEvent {
     private static func int(_ dict: [String: Any], _ key: String) -> Int? {
         if let n = dict[key] as? NSNumber { return n.intValue }
         if let s = dict[key] as? String { return Int(s) }
+        return nil
+    }
+
+    /// 为"阻塞等用户"类工具(AskUserQuestion / ExitPlanMode)凑一句 waiting 提示(纯展示,popover 会截断)。
+    /// AskUserQuestion:取第一个问题文本(退化用 header);ExitPlanMode:plan 太长,给固定语义提示。
+    private static func blockingToolPrompt(tool: String?, input: [String: Any]?) -> String? {
+        if let questions = input?["questions"] as? [[String: Any]], let first = questions.first {
+            return string(first, "question") ?? string(first, "header")
+        }
+        if tool == "ExitPlanMode" { return "等待批准计划" }
         return nil
     }
 

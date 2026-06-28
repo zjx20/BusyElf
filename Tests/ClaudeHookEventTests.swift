@@ -30,6 +30,31 @@ final class ClaudeHookEventTests: XCTestCase {
         XCTAssertEqual(e?.action, .update(tool: "Bash", detail: "ls", reply: nil, replyAppend: false, toolComplete: false))
     }
 
+    func testPreToolUseAskUserQuestionWaits() {
+        // AskUserQuestion 阻塞等用户 → wait(不发 Notification);提示文案取第一个问题文本。
+        let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"要不要继续?","header":"确认"}]}}"#)
+        XCTAssertEqual(e?.id, "s")
+        XCTAssertEqual(e?.action, .wait(message: "要不要继续?"))
+    }
+
+    func testPreToolUseAskUserQuestionFallsBackToHeader() {
+        // 没有 question 字段时退化用 header。
+        let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"header":"选个分支"}]}}"#)
+        XCTAssertEqual(e?.action, .wait(message: "选个分支"))
+    }
+
+    func testPreToolUseExitPlanModeWaits() {
+        // ExitPlanMode 阻塞等批准 → wait,固定提示"等待批准计划"。
+        let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"ExitPlanMode","tool_input":{"plan":"第一步..."}}"#)
+        XCTAssertEqual(e?.action, .wait(message: "等待批准计划"))
+    }
+
+    func testPostToolUseAskUserQuestionRevivesToWorking() {
+        // 用户应答后的 PostToolUse → 普通 update(toolComplete=true),让 waiting 复活回 working。
+        let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"要不要继续?"}],"answers":{"要不要继续?":"是"}}}"#)
+        XCTAssertEqual(e?.action, .update(tool: "AskUserQuestion", detail: nil, reply: nil, replyAppend: false, toolComplete: true))
+    }
+
     func testPostToolUse() {
         // 工具执行完 → update,toolComplete=true(打 ✓)。
         let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}"#)
