@@ -66,6 +66,13 @@ struct TaskSession: Identifiable {
         status == .working && sinceLastSeen(asOf: now) > threshold
     }
 
+    /// working 且超过"无活动阈值" → 疑似已断(看门狗):**不再阻止休眠**(派生,不改 status)。
+    /// 与 `isStuck` 同形但阈值更大、语义更强(stuck 只是 UI ⚠ 提示,stalled 会放行休眠)。
+    /// 收到任何新进展(`lastSeen` 刷新)即自动回到非 stalled,休眠重新被阻止。
+    func isStalled(asOf now: Date, threshold: TimeInterval) -> Bool {
+        status == .working && sinceLastSeen(asOf: now) > threshold
+    }
+
     /// 强制结束前判断是否"看起来仍活跃"(近期有 update),用于确认文案警示。
     func looksActive(asOf now: Date, within: TimeInterval = 30) -> Bool {
         status == .working && sinceLastSeen(asOf: now) < within

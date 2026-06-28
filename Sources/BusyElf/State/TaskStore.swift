@@ -24,6 +24,15 @@ final class TaskStore {
     private static let maxTerminalCount = 50                    // 终态项数硬上限
     private static let orphanGraceSeconds: TimeInterval = 300   // 孤儿子任务降级阈值
 
+    /// 看门狗:working 任务无活动超过它就视为"可能已断",不再阻止休眠(由 AppConfig 启动时注入)。
+    private var inactivityTimeout: TimeInterval = AppConfig.defaultInactivityTimeout
+    /// 疑似已断的顶层任务在无活动这么久后兜底移除(防 working 项无界堆积;远大于上面的阈值,留足查看时间)。
+    private static let stalledReapAfter: TimeInterval = 6 * 3600
+    /// 调度截止点时的小余量,确保 fire 时确实越过阈值(避免边界相等漏判)。
+    private static let watchdogMargin: TimeInterval = 0.2
+    /// 一次性看门狗定时器,跑在串行 `queue` 上;无 working 任务时取消 → 回到 0 idle CPU。
+    private var watchdog: DispatchSourceTimer?
+
     /// 每次变更后在主线程回调,携带排序后的快照。
     var onChange: (([TaskSession]) -> Void)?
     /// 任务进入 waiting(→waiting 跳变)时在主线程回调一次。
@@ -161,6 +170,23 @@ final class TaskStore {
         }
     }
 
+    // MARK: - 配置
+
+    /// 注入"无活动超时"(AppDelegate 从 AppConfig 注入;`/debug/timeout` 测试用)。
+    /// 走队列保证与 reconcile/看门狗的读取串行;设后立刻重算并重排看门狗。
+    func setInactivityTimeout(_ seconds: TimeInterval) {
+        queue.async {
+            self.inactivityTimeout = max(1, seconds)   // 测试可设很小;生产经 AppConfig 已 clamp ≥60
+            self.reconcile()
+        }
+    }
+
+    /// 是否存在"仍在阻止休眠"的 working 任务:working 且未超过无活动阈值(疑似已断的不算)。
+    /// 纯函数,便于单测;集合成员判定,绝不用整数计数。
+    static func hasBlockingWorking(_ sessions: [TaskSession], asOf now: Date, timeout: TimeInterval) -> Bool {
+        sessions.contains { $0.status == .working && !$0.isStalled(asOf: now, threshold: timeout) }
+    }
+
     // MARK: - 终态提示生命周期
 
     /// popover 打开:把当前所有终态项标记为 seen(清菜单栏角标),但**本次仍显示**。
@@ -205,17 +231,23 @@ final class TaskStore {
     /// 之前 enqueue 的所有 async 变更都已落库,故测试断言无需 sleep。
     func debugStateJSON() -> String {
         queue.sync {
+            let now = Date()
             let sorted = self.sortedLocked()
-            let hasWorking = self.sessions.values.contains { $0.status == .working }
+            let timeout = self.inactivityTimeout
+            // blocking = 派生的"仍在阻止休眠的 working"(疑似已断的不算);assertionHeld = 实际持有的电源断言。
+            // 二者稳态应一致;看门狗 fire 后 setBlocked(false) 才会让 assertionHeld 翻 false(故 E2E 用它验证 timer)。
+            let hasWorking = Self.hasBlockingWorking(Array(self.sessions.values), asOf: now, timeout: timeout)
             let hasUnseenDone = self.sessions.values.contains { $0.status == .done && !$0.seen }
             let hasUnseenFailed = self.sessions.values.contains { $0.status == .failed && !$0.seen }
             let root: [String: Any] = [
                 "blocking": hasWorking,
                 "hasWorking": hasWorking,
+                "assertionHeld": SleepGuard.shared.isBlocking,
+                "inactivityTimeout": timeout,
                 "hasUnseenDone": hasUnseenDone,
                 "hasUnseenFailed": hasUnseenFailed,
                 "count": sorted.count,
-                "sessions": sorted.map { Self.debugDict($0) },
+                "sessions": sorted.map { Self.debugDict($0, now: now, timeout: timeout) },
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]),
                   let str = String(data: data, encoding: .utf8) else { return "{}" }
@@ -223,13 +255,15 @@ final class TaskStore {
         }
     }
 
-    private static func debugDict(_ s: TaskSession) -> [String: Any] {
+    private static func debugDict(_ s: TaskSession, now: Date, timeout: TimeInterval) -> [String: Any] {
         var d: [String: Any] = [
             "id": s.id,
             "status": statusString(s.status),
             "seen": s.seen,
             "isTerminal": s.isTerminal,
             "isSubtask": s.isSubtask,
+            "stalled": s.isStalled(asOf: now, threshold: timeout),
+            "sinceLastSeen": s.sinceLastSeen(asOf: now),
             "startedAt": s.startedAt.timeIntervalSince1970,
             "lastSeen": s.lastSeen.timeIntervalSince1970,
         ]
@@ -266,9 +300,13 @@ final class TaskStore {
     /// 按 id 同步取单个 session。
     func sessionSync(_ id: String) -> TaskSession? { queue.sync { sessions[id] } }
 
-    /// 同步清空(测试隔离),并解除休眠阻止。
+    /// 同步清空(测试隔离),并解除休眠阻止 + 取消看门狗定时器(防测试间泄漏)。
     func resetSync() {
-        queue.sync { sessions.removeAll() }
+        queue.sync {
+            sessions.removeAll()
+            watchdog?.cancel()
+            watchdog = nil
+        }
         SleepGuard.shared.setBlocked(false)
     }
     #endif
@@ -278,8 +316,10 @@ final class TaskStore {
     /// 在串行队列上调用。先兜底清理,聚合派生量,驱动 SleepGuard,并在主线程回调。
     private func reconcile(attention: TaskSession? = nil, failedAlert: TaskSession? = nil) {
         pruneLocked()
-        let hasWorking = sessions.values.contains { $0.status == .working }
+        let now = Date()
+        let hasWorking = Self.hasBlockingWorking(Array(sessions.values), asOf: now, timeout: inactivityTimeout)
         SleepGuard.shared.setBlocked(hasWorking)
+        scheduleWatchdogLocked(asOf: now)
 
         let snap = sortedLocked()
         DispatchQueue.main.async {
@@ -287,6 +327,28 @@ final class TaskStore {
             if let attention { self.onAttention?(attention) }
             if let failedAlert { self.onTerminalAlert?(failedAlert) }
         }
+    }
+
+    /// 安排下一次"无活动重算":取所有 working 任务最近的关键时刻
+    ///  - 未疑似已断的:`lastSeen + inactivityTimeout`(到点要放行休眠);
+    ///  - 已疑似已断的:`lastSeen + stalledReapAfter`(到点要兜底移除)。
+    /// 无 working 任务则取消定时器(放行后机器可休眠,回到 0 idle CPU)。在串行 `queue` 上调用。
+    private func scheduleWatchdogLocked(asOf now: Date) {
+        var nextDeadline: Date?
+        for s in sessions.values where s.status == .working {
+            let stalled = s.isStalled(asOf: now, threshold: inactivityTimeout)
+            let d = s.lastSeen.addingTimeInterval(stalled ? Self.stalledReapAfter : inactivityTimeout)
+            if nextDeadline == nil || d < nextDeadline! { nextDeadline = d }
+        }
+        watchdog?.cancel()
+        guard let deadline = nextDeadline else { watchdog = nil; return }
+
+        let interval = max(1, deadline.timeIntervalSince(now)) + Self.watchdogMargin
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval)   // 一次性;fire 后由新的 reconcile 重排
+        timer.setEventHandler { [weak self] in self?.reconcile() }
+        watchdog = timer
+        timer.resume()
     }
 
     /// 兜底:孤儿子任务降级 + 终态项 TTL / 数量上限。在串行队列上调用。
@@ -303,6 +365,19 @@ final class TaskStore {
                 s.endedAt = now
                 s.seen = false
                 sessions[id] = s
+            }
+        }
+
+        // 疑似已断的顶层 working 任务超久无活动 → 兜底移除(级联子任务)。
+        // 它早已不阻止休眠(派生 stalled 排除),这里只为防 working 项无界堆积;远长于无活动阈值,
+        // 用户有充足时间在 popover 看到"可能已断"。不降级为 done/failed,避免谎报完成或误触失败横幅。
+        for id in Array(sessions.keys) {
+            guard let s = sessions[id], s.status == .working, s.parentId == nil else { continue }
+            if s.sinceLastSeen(asOf: now) > Self.stalledReapAfter {
+                sessions.removeValue(forKey: id)
+                for childId in sessions.values.filter({ $0.parentId == id }).map({ $0.id }) {
+                    sessions.removeValue(forKey: childId)
+                }
             }
         }
 

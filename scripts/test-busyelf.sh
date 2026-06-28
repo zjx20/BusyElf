@@ -59,6 +59,7 @@ task()  { curl -sS -m3 -o /dev/null -X POST "$BASE/v1/task/$1" -d "$2"; }       
 reset() { curl -sS -m3 -o /dev/null -X POST "$BASE/debug/reset"; }
 openpop()  { curl -sS -m3 -o /dev/null -X POST "$BASE/debug/seen"; }   # 模拟打开 popover
 closepop() { curl -sS -m3 -o /dev/null -X POST "$BASE/debug/purge"; }  # 模拟关闭 popover
+dbgto() { curl -sS -m3 -o /dev/null -X POST "$BASE/debug/timeout" -d "$1"; }  # 设无活动超时(秒)
 state() { curl -sS -m3 "$BASE/debug/state"; }
 
 # 断言:expect "描述" "jq 过滤器" "期望值"
@@ -177,6 +178,42 @@ task start '{"id":"P2","prompt":"x"}'
 task start '{"id":"P2#c","parentId":"P2","name":"sub"}'
 task remove '{"id":"P2"}'
 expect "remove 父 → 子任务一并移除" ".count" "0"
+
+group "看门狗:working 长时间无活动 → 放行休眠(标记可疑、可逆)"
+reset
+dbgto 1                                       # 无活动超时设为 1s(仅测试)
+task start '{"id":"W","prompt":"长任务","cwd":"/x"}'
+expect "刚启动 → working" "$(st W)" "working"
+expect "阻止休眠(派生)" ".blocking" "true"
+expect "电源断言已持有" ".assertionHeld" "true"
+expect "未超时 → 未标可疑" "$(fld W stalled)" "false"
+sleep 1.6                                      # 越过 1s 阈值 + 余量,等看门狗 timer 自行 fire
+expect "超时 → 放行休眠(派生)" ".blocking" "false"
+expect "看门狗已释放电源断言" ".assertionHeld" "false"
+expect "状态仍 working(未谎报终态)" "$(st W)" "working"
+expect "标记为可疑(stalled)" "$(fld W stalled)" "true"
+expect "任务仍保留" "$(has W)" "true"
+task update '{"id":"W","tool":"Edit","detail":"a.go"}'
+expect "收到新进展 → 复活,重新阻止休眠" ".blocking" "true"
+expect "电源断言重新持有" ".assertionHeld" "true"
+expect "不再可疑" "$(fld W stalled)" "false"
+dbgto 900                                      # 还原默认,避免影响后续
+
+group "配置:自定义端口(BUSYELF_HTTP_PORT 首选端口生效)"
+CUSTOM_PORT=18931
+BUSYELF_DEBUG=1 BUSYELF_HTTP_PORT=$CUSTOM_PORT "$BIN" >/dev/null 2>&1 &
+PORT_PID=$!
+port_ok=""
+for _ in $(seq 1 25); do
+  if curl -sS -m1 "http://127.0.0.1:$CUSTOM_PORT/debug/state" 2>/dev/null | grep -q '"blocking"'; then port_ok=1; break; fi
+  sleep 0.2
+done
+kill "$PORT_PID" 2>/dev/null; wait "$PORT_PID" 2>/dev/null   # wait 收尾,抑制 job-control "Terminated" 噪声
+if [ -n "$port_ok" ]; then
+  PASS=$((PASS+1)); printf "  ${GREEN}✓${RST} 实例监听自定义端口 %s\n" "$CUSTOM_PORT"
+else
+  FAIL=$((FAIL+1)); printf "  ${RED}✗ 自定义端口 %s 不可达${RST}\n" "$CUSTOM_PORT"
+fi
 
 group "容错:坏 body / 缺 id 仍 200 不崩、不影响状态"
 reset

@@ -72,7 +72,7 @@
 
 ### ⚠️ 端口要和 BusyElf 实际监听的一致
 
-URL 里的端口写死成默认 `17872`。**若 17872 被占用,BusyElf 会回退到 17873/17874/17875**,此时上面的 URL 会连到错误的进程或连不上——把端口改成 BusyElf 实际监听的那个(见 BusyElf 启动日志,或 `lsof -nP -iTCP:17872-17875 -sTCP:LISTEN`)。方式 B 的 curl URL 同理。
+URL 里的端口写死成默认 `17872`。**若 17872 被占用,BusyElf 会回退到 17873/17874/17875**,此时上面的 URL 会连到错误的进程或连不上——把端口改成 BusyElf 实际监听的那个(右键菜单顶部显示实际监听地址,或看启动日志 / `lsof -nP -iTCP:17872-17875 -sTCP:LISTEN`)。方式 B 的 curl URL 同理。想固定端口避免回退漂移:`defaults write elf.busyelf httpPort 12345` 后重开 BusyElf,再把所有 hook URL 改成该端口。
 
 ---
 

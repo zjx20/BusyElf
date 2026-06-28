@@ -32,7 +32,7 @@ struct Router {
 
         // 调试/观测端点(仅 BUSYELF_DEBUG=1):读内部状态 + 测试用的 reset / 模拟 popover 开关。
         if Self.debugEnabled, path.hasPrefix("/debug/") {
-            return routeDebug(path: path, isPost: isPost)
+            return routeDebug(path: path, isPost: isPost, body: body)
         }
 
         guard isPost else { return Self.okBody }
@@ -92,7 +92,7 @@ struct Router {
     }
 
     /// 调试/观测端点(仅 BUSYELF_DEBUG=1 时可达)。读只读状态 + 测试辅助。
-    private func routeDebug(path: String, isPost: Bool) -> String {
+    private func routeDebug(path: String, isPost: Bool, body: Data) -> String {
         switch path {
         case "/debug/state":            // GET:内部状态 JSON(写后读屏障,测试无需 sleep)
             return store.debugStateJSON()
@@ -104,6 +104,12 @@ struct Router {
             return Self.okBody
         case "/debug/purge":            // POST:模拟"关闭 popover" → 清理已 seen 终态
             if isPost { store.purgeSeenTerminal() }
+            return Self.okBody
+        case "/debug/timeout":          // POST body=秒数:设无活动超时并立即重排看门狗(测试看门狗放行用)
+            if isPost, let s = String(data: body, encoding: .utf8),
+               let secs = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                store.setInactivityTimeout(secs)
+            }
             return Self.okBody
         default:
             return Self.okBody

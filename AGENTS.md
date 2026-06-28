@@ -9,14 +9,14 @@ BusyElf 是一个**极致轻量的原生 macOS 菜单栏常驻 app**:有 AI agen
 ## ⚠️ 硬约束(改动前必读,违反即破坏产品定位)
 
 1. **纯 AppKit,永不链接 SwiftUI**。这是 12MB footprint 的关键(若 popover 用 SwiftUI,phys_footprint 飙到 ~129MB)。UI 全部手写 AppKit,见 `Sources/BusyElf/UI/`。不要 `import SwiftUI`、不要用 `@State`/`some View`。
-2. **休眠正确性 > 一切**。阻止休眠 ⟺ 存在任一 `working` 任务。
-   - 用**集合成员**(`[id: TaskSession]` 字典)判断,**绝不用 `+1/-1` 整数计数**——事件 at-least-once 且可能丢失/乱序,整数会漂移成负数或卡正 → **永久阻止休眠**(本 app 绝不能有的 bug)。
+2. **休眠正确性 > 一切**。阻止休眠 ⟺ 存在任一 `working` 任务**且其未"疑似已断"**(`now − lastSeen ≤ 无活动阈值`,默认 15min,看门狗;见下)。
+   - 用**集合成员**(`[id: TaskSession]` 字典)判断,**绝不用 `+1/-1` 整数计数**——事件 at-least-once 且可能丢失/乱序,整数会漂移成负数或卡正 → **永久阻止休眠**(本 app 绝不能有的 bug)。看门狗只是把判据从 `status==.working` 收紧为 `.working && !isStalled`(`TaskStore.hasBlockingWorking`),仍是集合成员判定,不引入计数。
    - **body 解析失败绝不能影响休眠逻辑**。休眠只看 路径(动词)+ `id`;其它字段解析不到只做展示降级。
-   - 宁可多醒不可漏醒:漏 `start` 也能靠 `update`/`wait`/`fail` 的 upsert 接管(中途启动)。
+   - 宁可多醒不可漏醒:漏 `start` 也能靠 `update`/`wait`/`fail` 的 upsert 接管(中途启动)。丢了 `done`/`fail` 也由看门狗在无活动超时后放行休眠(可逆:任一动词刷新 `lastSeen` 即恢复阻止)。
 3. **agent 中立核心**。`TaskStore` / 协议核心**永不 import 任何特定 agent 的概念**。所有"懂 Claude 字段名/事件语义"的代码**只允许**待在 `Server/ClaudeHookEvent.swift` 一个文件里。新增其它 agent 适配也照此隔离。
 4. **`/claude/hooks` 永远回 `2xx + 空 body`**。BusyElf 是纯被动观察者:绝不向 agent 注入上下文、不阻止工具、不改流程。
 5. **菜单栏图标绝不替换字形**(`bolt.fill` 固定)。换字形会改宽度让菜单栏抖动。状态靠 着色 / 数字 / 透明度 / 右上角合成角标 传达。见 `UI/StatusItemController.swift`。
-6. **idle 0 CPU**。服务端事件驱动(`NWListener`,kqueue 阻塞);popover 的 1s ticker 仅在可见时运行。别引入轮询/常驻定时器。
+6. **idle 0 CPU**。服务端事件驱动(`NWListener`,kqueue 阻塞);popover 的 1s ticker 仅在可见时运行。别引入轮询/常驻定时器。**看门狗例外但守此约束**:它的一次性 `DispatchSourceTimer` 只在有 `working` 任务时存在、精确调度到截止点,无 working 即取消——此时机器本就因阻止休眠而醒着,不是常驻轮询。
 7. **popover 紧凑**:每个 item 文本 ≤2-3 行、尾部 `...` 截断(`UI.label(truncates:)`)。不追求展示完整,有问题让用户回 agent 那边看。
 
 ---
@@ -40,7 +40,8 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 ```
 
 - 真相源是 `TaskStore.sessions` 字典,**单串行队列** `elf.busyelf.taskstore` 保护。所有动词走 `queue.async { … reconcile() }`。
-- `reconcile()` 三件事:`SleepGuard.setBlocked(hasWorking)`、主线程派发排序快照、`→waiting`/`→failed` 跳变发系统横幅(去抖)。
+- `reconcile()` 四件事:`SleepGuard.setBlocked(hasBlockingWorking)`、安排看门狗截止点(`scheduleWatchdogLocked`)、主线程派发排序快照、`→waiting`/`→failed` 跳变发系统横幅(去抖)。
+- 运行期配置在 `Config/AppConfig.swift`(端口/网口/看门狗阈值);`AppDelegate` 启动时把阈值注入 `TaskStore.setInactivityTimeout`。
 - UI 只读快照重绘(`PopoverController.rebuild()` 按 id 复用行对象)。
 
 ---
@@ -60,6 +61,8 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 
 `status ∈ {working, waiting, done, failed}`。`working` 阻止休眠;`waiting/done/failed` 放行。终态留存展示,靠 **seen 生命周期**清理:打开 popover→`markTerminalSeen`(清角标),关闭→`purgeSeenTerminal`(下次打开消失);另有 TTL/数量上限兜底(`pruneLocked`)。
 
+**看门狗(派生 stalled,不加第 5 个状态)**:`working` 任务 `now − lastSeen > inactivityTimeout`(默认 15min,可配)→ 派生为"疑似已断",`hasBlockingWorking` 把它排除 → **放行休眠**。状态仍是 `working`(不谎报 done/failed、不弹横幅),UI 标灰 + "可能已断";任一动词刷新 `lastSeen` 即自动恢复阻塞。靠 `reconcile` 里一次性 timer 精确到截止点重算;超久(默认 6h)仍无活动则在 `pruneLocked` 兜底移除。
+
 **子任务(subagent)**:把子 id 折进 `id`(`"父id#子id"`)+ `parentId` 表达;有 `parentId` 即子任务。折叠只发生在适配器边界,核心层无感。
 
 **Claude 适配映射**(`ClaudeHookEvent.swift`):`UserPromptSubmit`→start、`SubagentStart`→start(子)、`PostToolUse`→update、`MessageDisplay`→update(reply)、`Notification`(读 `notification_type`:permission→wait / idle→忽略)、`Stop`/`SubagentStop`/`SessionEnd`→done、`StopFailure`→fail。subagent 靠 `agent_id`/`agent_type`,**session_id 与父相同**。
@@ -71,7 +74,11 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 `project.yml`(XcodeGen)是工程**唯一真相源**;`.xcodeproj` 由它生成、**gitignore、从不手改**。
 
 ```bash
-# 构建 + 运行
+# 一键拉起(最常用):构建(若需要)→ 关掉本仓库旧实例 → 后台启动,菜单栏出现 ⚡
+scripts/run.sh
+#   --build 强制重建 / --debug 带 BUSYELF_DEBUG=1(开 /debug/*,日志 /tmp/busyelf.log)/ --stop 仅停
+
+# 或手动构建 + 运行(run.sh 内部就是这套)
 xcodegen generate
 xcodebuild -project BusyElf.xcodeproj -scheme BusyElf -configuration Release \
   -derivedDataPath build CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
@@ -96,6 +103,7 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 - **加一个新的中立字段**:`TaskSession`(展示状态)+ `TaskEvent`(中立 body 解析,可选 + 容错)同步加;`Router` 透传;按需在 `ClaudeHookEvent` 填充。中立接口要与 `/claude/hooks` **表现力对等**(子任务/流式回复/失败细节都用通用语义字段,不漏 Claude 概念)。
 - **加一个 Claude hook 事件**:只改 `ClaudeHookEvent.parse` 的 switch + 在 `docs/SETUP.md` 的推荐配置里加该事件指向 `/claude/hooks`。核心层不动。
 - **加一个新动词**:`Router.TaskVerb` + `verb(for:)` + `route` + `TaskStore` 加方法(照 `queue.async{…reconcile()}` 骨架)+ `docs/PROTOCOL.md`。
+- **加一个配置项**:`Config/AppConfig.swift` 加纯静态 `resolveXxx`(env > UserDefaults > 默认)+ 属性;布尔类宜走右键菜单复选(`AppDelegate.showContextMenu`),数值类走 `defaults write elf.busyelf <key>`。env 层(`BUSYELF_*`)供测试覆盖,别污染用户 defaults。
 - **改 UI**:复用 `UI.label/DotView/HoverRow/ClickableRow`(`UI/AppKitHelpers.swift`)、`Format.duration/ago`。
 
 每加一处行为,**在两个测试脚本里补断言**(E2E 断 `/debug/state`,单元断内部逻辑)。
@@ -111,7 +119,8 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 ## 约定
 
 - 注释用**中文**,与现有风格一致;命名/缩进/惯用法贴合周边代码。
-- 端口默认 `17872`,被占用回退 `17873/17874/17875`(`LoopbackServer.candidatePorts`);适配器 URL 写死默认端口,文档已提示回退。
+- 端口默认 `17872`(可经 `defaults write elf.busyelf httpPort N` 改),被占用回退 `17873/17874/17875`(`LoopbackServer.candidatePorts(preferred:)`,首选端口在前);右键菜单显示实际监听地址。适配器 URL 写死默认端口,文档已提示回退。
+- 默认仅 loopback;右键菜单可切「监听所有网口 (0.0.0.0)」(`AppConfig.listenOnAllInterfaces` + `server.restart()`),无鉴权,仅可信网络用。
 - 仅 loopback 可达、**无鉴权**(纯本机同用户场景,刻意从简)。
 - 提交信息/PR 按用户要求再做;默认分支上动手前先开分支。
 

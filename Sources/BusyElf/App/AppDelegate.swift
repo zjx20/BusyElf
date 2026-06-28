@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 单元测试宿主:跳过 app 装配(不起服务端 / 不建状态栏),让测试纯跑内部逻辑。
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
 
+        TaskStore.shared.setInactivityTimeout(AppConfig.shared.inactivityTimeout)   // 看门狗阈值:从配置注入
         setUpStatusItem()
         setUpPopover()
         wireStore()
@@ -54,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func ensurePopoverContent() {
         guard popoverController == nil else { return }
         let controller = PopoverController()
+        controller.onRestartServer = { [weak self] in self?.server?.restart() }
+        controller.listenAddressProvider = { [weak self] in
+            guard let p = self?.server?.port, p != 0 else { return nil }
+            return "\(AppConfig.shared.listenOnAllInterfaces ? "0.0.0.0" : "127.0.0.1"):\(p)"
+        }
         controller.update(sessions: latestSessions)   // 喂入当前快照
         popover.contentViewController = controller
         popoverController = controller
@@ -87,7 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleStoreChange(_ sessions: [TaskSession]) {
         latestSessions = sessions
-        let working = sessions.filter { $0.status == .working }.count
+        // 疑似已断(stalled)的 working 不再算"在干活":图标不显忙(与"已放行休眠"一致)。
+        let now = Date()
+        let timeout = AppConfig.shared.inactivityTimeout
+        let working = sessions.filter {
+            $0.status == .working && !$0.isStalled(asOf: now, threshold: timeout)
+        }.count
         let waiting = sessions.filter { $0.status == .waiting }.count
         let badge = StatusBadge(
             hasUnseenFailed: sessions.contains { $0.status == .failed && !$0.seen },
@@ -129,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let displayItem = NSMenuItem(
-            title: "也保持屏幕唤醒", action: #selector(toggleKeepDisplayAwakeFromMenu), keyEquivalent: "")
+            title: "保持屏幕唤醒", action: #selector(toggleKeepDisplayAwakeFromMenu), keyEquivalent: "")
         displayItem.target = self
         displayItem.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
         menu.addItem(displayItem)
@@ -139,6 +150,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.target = self
         loginItem.state = LoginItem.isEnabled ? .on : .off
         menu.addItem(loginItem)
+
+        menu.addItem(.separator())
+
+        // 实际监听地址(只读,action=nil → 自动置灰显示);未就绪显示提示。
+        let addr: String
+        if let p = server?.port, p != 0 {
+            let host = AppConfig.shared.listenOnAllInterfaces ? "0.0.0.0" : "127.0.0.1"
+            addr = "监听:\(host):\(p)"
+        } else {
+            addr = "监听:未就绪"
+        }
+        menu.addItem(NSMenuItem(title: addr, action: nil, keyEquivalent: ""))
+
+        let listenAllItem = NSMenuItem(
+            title: "监听所有网口 (0.0.0.0)", action: #selector(toggleListenAllFromMenu), keyEquivalent: "")
+        listenAllItem.target = self
+        listenAllItem.state = AppConfig.shared.listenOnAllInterfaces ? .on : .off
+        listenAllItem.toolTip = "允许局域网内其它机器/容器上报任务(无鉴权,会触发系统本地网络授权弹窗)"
+        menu.addItem(listenAllItem)
 
         menu.addItem(.separator())
         menu.addItem(withTitle: "关于 BusyElf", action: #selector(showAbout), keyEquivalent: "")
@@ -161,6 +191,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleLaunchAtLoginFromMenu() {
         LoginItem.setEnabled(!LoginItem.isEnabled)
+    }
+
+    @objc private func toggleListenAllFromMenu() {
+        // 切换并持久化,然后热重启监听让新网口配置生效。
+        AppConfig.shared.setListenOnAllInterfaces(!AppConfig.shared.listenOnAllInterfaces)
+        server?.restart()
     }
 
     @objc private func openPopoverFromMenu() {

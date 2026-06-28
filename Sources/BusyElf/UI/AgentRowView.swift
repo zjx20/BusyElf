@@ -77,12 +77,30 @@ final class AgentRowView: HoverRow {
         if confirming { updateConfirmAppearance() }
     }
 
-    /// 仅刷新随时间变化的部分(时长 / 活跃警示),不重排。
+    /// 仅刷新随时间变化的部分(时长 / 卡死 / 疑似已断),不重排。
     func refreshTime(now: Date) {
         self.now = now
-        thirdLabel.stringValue = thirdLineText()
-        stuckIcon.isHidden = !session.isStuck(asOf: now)
+        applyTimeVarying()
         if confirming { updateConfirmAppearance() }
+    }
+
+    /// working 且超过无活动阈值 → 疑似已断(看门狗已放行休眠)。
+    private var stalled: Bool {
+        session.isStalled(asOf: now, threshold: AppConfig.shared.inactivityTimeout)
+    }
+
+    /// 随时间变化的视觉:状态点(working 疑似已断转灰)、卡死/已断 ⚠ 图标、第三行文案。apply 与 ticker 共用。
+    private func applyTimeVarying() {
+        let stalled = self.stalled
+        stuckIcon.isHidden = !(stalled || session.isStuck(asOf: now))
+        stuckIcon.toolTip = stalled
+            ? "超过无响应阈值,已放行休眠(收到新进展会自动恢复)"
+            : "长时间无进展,可能已卡死"
+        if session.status == .working {
+            dot.color = stalled ? .systemGray : .systemGreen
+            dot.toolTip = stalled ? "可能已断 · 已放行休眠" : "在干活"
+        }
+        thirdLabel.stringValue = thirdLineText()
     }
 
     // MARK: - 应用 session → 视图
@@ -110,8 +128,6 @@ final class AgentRowView: HoverRow {
             errorBadge.isHidden = true
         }
 
-        stuckIcon.isHidden = !session.isStuck(asOf: now)
-
         // 主信息行(全部 2 行封顶、尾部截断)
         switch status {
         case .waiting:
@@ -124,11 +140,11 @@ final class AgentRowView: HoverRow {
             let r = firstNonEmpty(session.reply) ?? "已完成"
             setSecond(r, color: .secondaryLabelColor, tip: session.reply)
         case .working:
-            let act = session.activity.isEmpty ? "在干活…" : session.activity
+            let act = session.activity.isEmpty ? "在思考…" : session.activity
             setSecond(act, color: session.activity.isEmpty ? .secondaryLabelColor : .labelColor, tip: session.activity)
         }
 
-        thirdLabel.stringValue = thirdLineText()
+        applyTimeVarying()   // 状态点(working 已断转灰)/ ⚠ 图标 / 第三行,随时间变化
     }
 
     private func setSecond(_ text: String, color: NSColor, tip: String?) {
@@ -151,6 +167,7 @@ final class AgentRowView: HoverRow {
 
     private func thirdLineText() -> String {
         var parts: [String] = []
+        if stalled { parts.append("可能已断") }   // 看门狗已放行休眠;收到新进展会自动恢复
         switch session.status {
         case .done:   parts.append("完成")
         case .failed: parts.append("失败")

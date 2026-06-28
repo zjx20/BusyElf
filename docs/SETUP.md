@@ -81,8 +81,9 @@ curl -sS -m2 -X POST http://127.0.0.1:17872/claude/hooks \
 ## 排错
 
 - **完全没反应**:确认 BusyElf 在跑(菜单栏有 ⚡)、监听在 `17872`。BusyElf 没开时 Claude **不会被卡住**(连接失败是非阻塞错误),只是不记录而已。
-- **端口不是 17872**:若 17872 被占用,BusyElf 会回退到 `17873/17874/17875`。把配置里 URL 的端口改成实际值(看 BusyElf 启动日志,或 `lsof -nP -iTCP:17872-17875 -sTCP:LISTEN`)。
-- **菜单栏有残留任务**:agent 硬崩溃(没发 `Stop`/`SessionEnd`)会残留任务并持续阻止休眠——点开 popover 用 `×` 手动移除,或「全部结束」。
+- **端口不是 17872**:若 17872 被占用,BusyElf 会回退到 `17873/17874/17875`。把配置里 URL 的端口改成实际值(右键菜单顶部显示实际监听地址,或看启动日志 / `lsof -nP -iTCP:17872-17875 -sTCP:LISTEN`)。想固定端口:`defaults write elf.busyelf httpPort 12345` 后重开 BusyElf,再把 hook URL 改成该端口。
+- **菜单栏有残留任务**:agent 硬崩溃(没发 `Stop`/`SessionEnd`)会残留 working 任务。**看门狗**会在它无活动超过阈值(默认 15 分钟)后标为"可能已断"并**自动放行休眠**;想立刻清掉就点开 popover 用 `×` 移除,或「全部结束」。改阈值:`defaults write elf.busyelf inactivityTimeoutSeconds 900`(下限 60s)后重开。
+- **想让其它机器/容器上报任务**:右键菜单勾「监听所有网口 (0.0.0.0)」(首次会弹系统本地网络授权)。注意服务**无鉴权**,仅在可信网络开启。
 - **临时全关 hooks**:在设置文件里设 `"disableAllHooks": true`。
 - **合盖仍会休眠**:`PreventUserIdleSystemSleep` 只挡"空闲休眠",管不了合盖/手动休眠/低电量。长任务合盖跑请外接显示器 + 电源。
 

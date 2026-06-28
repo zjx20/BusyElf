@@ -31,6 +31,18 @@ final class PopoverController: NSViewController {
     private let stopAllContainer = NSView()
     private let displaySwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
+    private let listenAllSwitch = NSSwitch()
+    private let addressLabel = UI.label(size: 11, color: .secondaryLabelColor)
+    private var portRow: SettingFieldRow?
+    private var timeoutRow: SettingFieldRow?
+    // "更多设置"折叠:默认收起,点一下才展开(不常用项不抢戏)。
+    private var showMore = false
+    private var moreContainer: NSStackView?
+    private var moreChevron: NSImageView?
+
+    /// 由 AppDelegate 注入:切网口后重启监听 / 取当前实际监听地址(端口可能回退,故运行时取)。
+    var onRestartServer: (() -> Void)?
+    var listenAddressProvider: (() -> String?)?
 
     private let contentWidth: CGFloat = 340
 
@@ -67,7 +79,12 @@ final class PopoverController: NSViewController {
         isPopoverVisible = true
         displaySwitch.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
-        rebuild()   // rebuild 在可见时会 markTerminalSeen(清角标),本次仍显示这些终态项
+        listenAllSwitch.state = AppConfig.shared.listenOnAllInterfaces ? .on : .off
+        portRow?.refresh()
+        timeoutRow?.refresh()
+        updateListenAddress()
+        collapseMore()   // 每次打开都收起"更多设置",保持清爽
+        rebuild()        // rebuild 在可见时会 markTerminalSeen(清角标),本次仍显示这些终态项
         startTicker()
     }
 
@@ -196,7 +213,11 @@ final class PopoverController: NSViewController {
     }
 
     private func updateHeader() {
-        let working = sessions.lazy.filter { $0.status == .working }.count
+        let now = self.now
+        let timeout = AppConfig.shared.inactivityTimeout
+        // 疑似已断(stalled)的 working 不算"在干活":不显示 "Blocking sleep"。
+        let working = sessions.lazy.filter { $0.status == .working && !$0.isStalled(asOf: now, threshold: timeout) }.count
+        let stalled = sessions.lazy.filter { $0.status == .working && $0.isStalled(asOf: now, threshold: timeout) }.count
         let waiting = sessions.lazy.filter { $0.status == .waiting }.count
         let failed = sessions.lazy.filter { $0.status == .failed }.count
         if sessions.isEmpty {
@@ -211,6 +232,9 @@ final class PopoverController: NSViewController {
         } else if waiting > 0 {
             subtitleLabel.stringValue = "等你处理 · \(sessions.count) 个任务"
             boltIcon.contentTintColor = .systemOrange
+        } else if stalled > 0 {
+            subtitleLabel.stringValue = "可能已断 · 已放行休眠 · \(sessions.count) 个任务"
+            boltIcon.contentTintColor = .systemGray
         } else {
             subtitleLabel.stringValue = "已完成 · \(sessions.count) 个任务"
             boltIcon.contentTintColor = .systemGreen
@@ -240,6 +264,7 @@ final class PopoverController: NSViewController {
             guard let self else { return }
             self.now = Date()
             for row in self.rowsById.values { row.refreshTime(now: self.now) }
+            self.updateHeader()   // 任务跨过无活动阈值时,表头随行一起切到"可能已断"
         }
         RunLoop.main.add(timer, forMode: .common)
         ticker = timer
@@ -256,6 +281,89 @@ final class PopoverController: NSViewController {
     @objc private func toggleLaunchAtLogin() {
         LoginItem.setEnabled(loginSwitch.state == .on)
         loginSwitch.state = LoginItem.isEnabled ? .on : .off   // 失败则回弹
+    }
+    @objc private func toggleListenAll() {
+        AppConfig.shared.setListenOnAllInterfaces(listenAllSwitch.state == .on)
+        onRestartServer?()                 // 热重启监听让新网口生效(首次绑非回环会弹系统授权)
+        updateListenAddress()
+        // 重启后端口短暂为 0,稍后再刷新一次拿到就绪地址。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.updateListenAddress() }
+    }
+
+    private func updateListenAddress() {
+        addressLabel.stringValue = "监听 " + (listenAddressProvider?() ?? "未就绪")
+        addressLabel.toolTip = "BusyElf 实际监听地址;把适配器/hook 的 URL 指到这里"
+    }
+
+    /// 应用端口(SettingFieldRow 回车回调):合法且确有变化才重启监听。返回归一化后显示值。
+    private func commitPort(_ s: String) -> String {
+        let raw = Int(s.trimmingCharacters(in: .whitespaces)) ?? 0
+        if AppConfig.shared.setPreferredPort(raw), UInt16(raw) != currentBoundPort() {
+            onRestartServer?()              // 重启监听绑新端口(记得同步改 hook URL)
+            updateListenAddress()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.updateListenAddress() }
+        }
+        return String(AppConfig.shared.preferredPort)
+    }
+
+    /// 应用看门狗无活动阈值(分钟,clamp 下限 1 分钟)。返回归一化后显示值(分钟)。
+    private func commitTimeout(_ s: String) -> String {
+        let mins = Int(s.trimmingCharacters(in: .whitespaces)) ?? 0
+        let secs = AppConfig.shared.setInactivityTimeout(Double(mins) * 60)
+        TaskStore.shared.setInactivityTimeout(secs)                   // 同步到核心(blocking 判定)
+        return String(Int((secs / 60).rounded()))
+    }
+
+    /// 当前实际绑定端口(从地址行解析;取不到则 nil),用于判断端口是否真的变了。
+    private func currentBoundPort() -> UInt16? {
+        guard let addr = listenAddressProvider?(), let p = addr.split(separator: ":").last,
+              let n = UInt16(p) else { return nil }
+        return n
+    }
+
+    // MARK: - 更多设置(折叠)
+
+    private func makeMoreToggleRow() -> NSView {
+        let chevron = NSImageView()
+        chevron.image = UI.symbol("chevron.right", size: 11)
+        chevron.contentTintColor = .secondaryLabelColor
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
+        moreChevron = chevron
+
+        let content = NSStackView(views: [chevron, UI.label("更多设置", size: 12), UI.hSpacer()])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+
+        let row = ClickableRow()
+        row.onClick = { [weak self] in self?.toggleMore() }
+        embed(content, in: row, insets: NSEdgeInsets(top: 7, left: 16, bottom: 7, right: 16))
+        return row
+    }
+
+    private func toggleMore() {
+        showMore.toggle()
+        if showMore {   // 展开时把折叠区内控件刷成当前真相值
+            loginSwitch.state = LoginItem.isEnabled ? .on : .off
+            listenAllSwitch.state = AppConfig.shared.listenOnAllInterfaces ? .on : .off
+            portRow?.refresh()
+            timeoutRow?.refresh()
+            updateListenAddress()
+        }
+        applyMoreState()
+    }
+
+    private func collapseMore() {
+        showMore = false
+        applyMoreState()
+    }
+
+    private func applyMoreState() {
+        moreChevron?.image = UI.symbol(showMore ? "chevron.down" : "chevron.right", size: 11)
+        moreContainer?.isHidden = !showMore
+        syncContentSize()
     }
     @objc private func askStopAll() { confirmingStopAll = true; updateFooter() }
     @objc private func cancelStopAll() { confirmingStopAll = false; updateFooter() }
@@ -366,14 +474,42 @@ final class PopoverController: NSViewController {
     }
 
     private func makeFooter() -> NSView {
-        let displayRow = toggleRow(icon: "moon.fill", title: "也保持屏幕唤醒",
+        let displayRow = toggleRow(icon: "moon.fill", title: "保持屏幕唤醒",
                                    sw: displaySwitch, action: #selector(toggleDisplayAwake))
         let loginRow = toggleRow(icon: "power", title: "开机启动",
                                  sw: loginSwitch, action: #selector(toggleLaunchAtLogin))
 
+        // 不常用项折进"更多设置"(默认折叠),点一下才展开。
+        let moreToggle = makeMoreToggleRow()
+        let listenRow = toggleRow(icon: "network", title: "监听所有网口 (0.0.0.0)",
+                                  sw: listenAllSwitch, action: #selector(toggleListenAll))
+        let addressRow = makeCaptionRow(addressLabel)
+        let port = SettingFieldRow(icon: "number", title: "端口", suffix: nil,
+            read: { String(AppConfig.shared.preferredPort) },
+            commit: { [weak self] in self?.commitPort($0) ?? String(AppConfig.shared.preferredPort) })
+        let timeout = SettingFieldRow(icon: "moon.zzz", title: "无响应超时", suffix: "分钟",
+            read: { String(Int((AppConfig.shared.inactivityTimeout / 60).rounded())) },
+            commit: { [weak self] in self?.commitTimeout($0) ?? "" })
+        portRow = port; timeoutRow = timeout
+
+        let more = NSStackView(views: [loginRow, listenRow, addressRow, port, timeout])
+        more.orientation = .vertical
+        more.alignment = .leading
+        more.spacing = 0
+        more.translatesAutoresizingMaskIntoConstraints = false
+        for v in more.arrangedSubviews {
+            v.leadingAnchor.constraint(equalTo: more.leadingAnchor).isActive = true
+            v.trailingAnchor.constraint(equalTo: more.trailingAnchor).isActive = true
+        }
+        more.isHidden = true
+        moreContainer = more
+
         let quitRow = clickableTextRow(title: "Quit BusyElf", trailing: "⌘Q") { [weak self] in self?.quit() }
 
-        let footer = NSStackView(views: [stopAllContainer, displayRow, loginRow, UI.separator(), quitRow])
+        let footer = NSStackView(views: [
+            stopAllContainer, displayRow, moreToggle, more,
+            UI.separator(), quitRow,
+        ])
         footer.orientation = .vertical
         footer.alignment = .leading
         footer.spacing = 0
@@ -427,6 +563,22 @@ final class PopoverController: NSViewController {
         let row = ClickableRow()
         row.onClick = onClick
         embed(content, in: row, insets: NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16))
+        return row
+    }
+
+    /// 只读小字说明行(如"监听 …"),左对齐到与开关标题齐平(图标宽 16 + 间距 6 + 左边距 16)。
+    private func makeCaptionRow(_ label: NSTextField) -> NSView {
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.lineBreakMode = .byTruncatingTail
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: row.topAnchor),
+            label.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -7),
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 38),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor, constant: -16),
+        ])
         return row
     }
 
@@ -503,4 +655,108 @@ final class PopoverController: NSViewController {
 /// 翻转坐标系的 document view,让滚动内容从顶部排起。
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// 设置里的"值 + 修改"行:默认只读显示当前值,点「修改」才出现输入框并聚焦;
+/// 回车应用、点别处放弃(都退回只读)。避免输入框常驻聚焦抢视觉。
+private final class SettingFieldRow: NSView, NSTextFieldDelegate {
+    private let valueLabel = UI.label(size: 12, color: .secondaryLabelColor)
+    private let editButton = NSButton()
+    private let field = NSTextField()
+    private let suffixLabel: NSTextField?
+    private let suffix: String?
+    private let read: () -> String          // 取当前显示值(原始,不含单位)
+    private let commit: (String) -> String  // 应用输入并返回归一化后的显示值
+    private var editing = false
+
+    init(icon: String, title: String, suffix: String?,
+         read: @escaping () -> String, commit: @escaping (String) -> String) {
+        self.suffix = suffix
+        self.suffixLabel = suffix.map { UI.label($0, size: 11, color: .secondaryLabelColor) }
+        self.read = read
+        self.commit = commit
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let img = NSImageView()
+        img.image = UI.symbol(icon, size: 11)
+        img.contentTintColor = .secondaryLabelColor
+        img.translatesAutoresizingMaskIntoConstraints = false
+        img.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        img.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = UI.label(title, size: 12)
+        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        editButton.title = "修改"
+        editButton.bezelStyle = .rounded
+        editButton.controlSize = .small
+        editButton.target = self
+        editButton.action = #selector(startEdit)
+        editButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        field.controlSize = .small
+        field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        field.alignment = .right
+        field.usesSingleLineMode = true
+        field.delegate = self
+        field.isHidden = true
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.widthAnchor.constraint(equalToConstant: 66).isActive = true
+        field.setContentHuggingPriority(.required, for: .horizontal)
+        suffixLabel?.isHidden = true
+
+        var trailing: [NSView] = [valueLabel, editButton, field]
+        if let suffixLabel { trailing.append(suffixLabel) }
+        let content = NSStackView(views: [img, titleLabel, UI.hSpacer()] + trailing)
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: topAnchor, constant: 5),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+        ])
+        refresh()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    /// 刷新显示值并退回只读态(打开/展开时调用)。
+    func refresh() {
+        valueLabel.stringValue = displayText(read())
+        setEditing(false)
+    }
+
+    private func displayText(_ raw: String) -> String {
+        suffix.map { "\(raw) \($0)" } ?? raw
+    }
+
+    private func setEditing(_ on: Bool) {
+        editing = on
+        valueLabel.isHidden = on
+        editButton.isHidden = on
+        field.isHidden = !on
+        suffixLabel?.isHidden = !on
+        if on {
+            field.stringValue = read()
+            window?.makeFirstResponder(field)
+        }
+    }
+
+    @objc private func startEdit() { setEditing(true) }
+
+    // 回车 → 应用;Esc / 点别处 → 放弃。都退回只读态。
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard editing else { return }
+        let movement = (obj.userInfo?["NSTextMovement"] as? Int) ?? 0
+        if movement == NSTextMovement.return.rawValue {
+            valueLabel.stringValue = displayText(commit(field.stringValue))
+        } else {
+            valueLabel.stringValue = displayText(read())   // 放弃:回原值
+        }
+        setEditing(false)
+    }
 }

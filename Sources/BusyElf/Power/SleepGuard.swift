@@ -3,7 +3,7 @@ import IOKit.pwr_mgt
 
 /// 包裹 IOKit 电源断言。BusyElf 全局至多持有两个断言:
 ///  - 系统 idle 休眠断言(== `caffeinate -i`):存在 working 任务时持有。
-///  - 显示器 idle 休眠断言:仅当用户开启"也保持屏幕唤醒"且正在阻止休眠时持有。
+///  - 显示器 idle 休眠断言:仅当用户开启"保持屏幕唤醒"且正在阻止休眠时持有。
 ///
 /// 断言绑定进程:BusyElf 一旦退出/崩溃,powerd 自动回收,绝不会把 Mac 永久钉醒。
 /// 本类只是个薄壳,所有状态用 `NSLock` 保护,可从任意线程调用。
@@ -29,7 +29,7 @@ final class SleepGuard {
         reconcileLocked()
     }
 
-    /// 由 UI 开关"也保持屏幕唤醒"调用。
+    /// 由 UI 开关"保持屏幕唤醒"调用。
     func setKeepDisplayAwake(_ on: Bool) {
         lock.lock(); defer { lock.unlock() }
         guard on != keepDisplayAwake else { return }
@@ -42,7 +42,7 @@ final class SleepGuard {
         return systemAssertion != 0
     }
 
-    /// "也保持屏幕唤醒"偏好的真相源(供 popover 与右键菜单读取,保持两处一致)。
+    /// "保持屏幕唤醒"偏好的真相源(供 popover 与右键菜单读取,保持两处一致)。
     var keepsDisplayAwake: Bool {
         lock.lock(); defer { lock.unlock() }
         return keepDisplayAwake
