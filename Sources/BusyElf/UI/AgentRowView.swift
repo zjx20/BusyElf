@@ -142,9 +142,14 @@ final class AgentRowView: HoverRow {
         case .working:
             let hasAct = !session.activity.isEmpty
             let act = hasAct ? session.activity : "在思考…"
-            // 这一步(工具调用)已完成则前缀 ✓;仅标"这一步完成",任务仍 working、仍阻止休眠。
-            let shown = (hasAct && session.toolComplete) ? "✓ " + act : act
-            setSecond(shown, color: hasAct ? .labelColor : .secondaryLabelColor, tip: session.activity)
+            // 这一步(工具调用)的标记:失败前缀 ✗(优先),完成前缀 ✓;仅标"这一步如何",任务仍 working、仍阻止休眠。
+            // 工具失败是常态,不是终态(不变红、不弹横幅),只是动作行多一个 ✗。失败原因(若有)挂 tooltip。
+            let shown: String
+            if hasAct && session.toolFailed { shown = "✗ " + act }
+            else if hasAct && session.toolComplete { shown = "✓ " + act }
+            else { shown = act }
+            let tip = firstNonEmpty(session.toolError).map { "\(session.activity)\n失败:\($0)" } ?? session.activity
+            setSecond(shown, color: hasAct ? .labelColor : .secondaryLabelColor, tip: tip)
         }
 
         applyTimeVarying()   // 状态点(working 已断转灰)/ ⚠ 图标 / 第三行,随时间变化

@@ -30,9 +30,11 @@ final class TaskStoreTests: XCTestCase {
     private func update(_ id: String, parentId: String? = nil, name: String? = nil,
                         tool: String? = nil, detail: String? = nil,
                         reply: String? = nil, replyAppend: Bool = false,
-                        toolComplete: Bool = false) {
+                        toolComplete: Bool = false,
+                        toolFailed: Bool = false, toolError: String? = nil) {
         store.update(id: id, parentId: parentId, name: name, tool: tool, detail: detail,
                      reply: reply, replyAppend: replyAppend, toolComplete: toolComplete,
+                     toolFailed: toolFailed, toolError: toolError,
                      agent: nil, cwd: nil)
     }
 
@@ -144,6 +146,23 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertEqual(s("ac")?.toolComplete, true)
         start("ac", prompt: "new turn")                                  // 新 turn → 清零
         XCTAssertEqual(s("ac")?.toolComplete, false)
+    }
+
+    /// toolFailed(工具失败 ✗):置位 + 记原因/失败仍 working(非终态)/下个动作覆盖旧 ✗/新 turn 清零。
+    func testToolFailedLifecycle() {
+        update("af", tool: "Bash", detail: "npm test", toolComplete: true, toolFailed: true, toolError: "exit 1")
+        XCTAssertEqual(s("af")?.toolFailed, true)
+        XCTAssertEqual(s("af")?.toolError, "exit 1")
+        XCTAssertEqual(s("af")?.status, .working)                        // 工具失败不是终态,仍 working
+        XCTAssertTrue(blocking)                                          // 仍阻止休眠
+        update("af", tool: "Edit", detail: "a.swift", toolComplete: true) // 下个动作成功 → ✗ 与原因都被覆盖清掉
+        XCTAssertEqual(s("af")?.toolFailed, false)
+        XCTAssertNil(s("af")?.toolError)
+        XCTAssertEqual(s("af")?.toolComplete, true)
+        update("af", tool: "Bash", detail: "y", toolComplete: true, toolFailed: true, toolError: "boom")
+        start("af", prompt: "new turn")                                  // 新 turn → 清零失败标记/原因
+        XCTAssertEqual(s("af")?.toolFailed, false)
+        XCTAssertNil(s("af")?.toolError)
     }
 
     // MARK: - 子任务 / 移除

@@ -120,6 +120,20 @@ expect "复活后重新阻止休眠" ".blocking" "true"
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"T","prompt":"下一轮"}'
 expect "新 turn → 清钩" "$(fld T toolComplete)" "false"
 
+group "PostToolUseFailure:工具失败 → 打 ✗(仍 working,非终态)"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"TF","cwd":"/p","prompt":"跑测试"}'
+hook '{"hook_event_name":"PostToolUseFailure","session_id":"TF","tool_name":"Bash","tool_input":{"command":"npm test"},"error":"Command exited with non-zero status code 1"}'
+expect "失败工具刷新 activity" "$(fld TF activity)" "Bash: npm test"
+expect "PostToolUseFailure → toolFailed(✗)" "$(fld TF toolFailed)" "true"
+expect "失败原因落库(tooltip 用)" "$(fld TF toolError)" "Command exited with non-zero status code 1"
+expect "工具失败不是终态,仍 working" "$(st TF)" "working"
+expect "工具失败仍阻止休眠" ".blocking" "true"
+expect "工具失败不触发红点(非任务级 failed)" ".hasUnseenFailed" "false"
+hook '{"hook_event_name":"PostToolUse","session_id":"TF","tool_name":"Edit","tool_input":{"file_path":"a.go"}}'
+expect "下个动作成功 → 清 ✗" "$(fld TF toolFailed)" "false"
+expect "下个动作成功 → 打 ✓" "$(fld TF toolComplete)" "true"
+
 group "需求2:Stop → done(不删,绿点)+ seen 生命周期"
 reset
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"D","cwd":"/proj","prompt":"重构 auth"}'
@@ -179,6 +193,10 @@ expect "中立 start+update → working" "$(st n1)" "working"
 expect "中立 update 缺省 → 未打钩" "$(fld n1 toolComplete)" "false"
 task update '{"id":"n1","tool":"Edit","toolInput":"auth.go","toolComplete":true}'
 expect "中立 toolComplete 透传 → ✓" "$(fld n1 toolComplete)" "true"
+task update '{"id":"n1","tool":"Bash","toolInput":"npm test","toolComplete":true,"toolFailed":true,"toolError":"exit 1"}'
+expect "中立 toolFailed 透传 → ✗" "$(fld n1 toolFailed)" "true"
+expect "中立 toolError 透传" "$(fld n1 toolError)" "exit 1"
+expect "工具失败仍 working" "$(st n1)" "working"
 task start  '{"id":"n1#s","parentId":"n1","name":"Explore"}'
 expect "中立子任务折叠 id + parentId" "$(fld 'n1#s' parentId)" "n1"
 task "done" '{"id":"n1#s","reply":"扫描完成"}'

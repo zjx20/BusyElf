@@ -15,6 +15,7 @@ import Foundation
 ///   - `SubagentStart`    → start    (子任务开始;agent_id 折进 id,parentId=session_id,name=agent_type)
 ///   - `PreToolUse`       → update  (工具即将执行 → 即时显示"正在做的工具",toolComplete=false)
 ///   - `PostToolUse`      → update  (工具已完成 → toolComplete=true 打 ✓;也是 waiting/终态→working 的恢复信号)
+///   - `PostToolUseFailure` → update (工具失败 → toolFailed=true 打 ✗;失败是常态非终态,仍 working;error 进 toolError 作 tooltip)
 ///   - `MessageDisplay`   → update  (助手实时回复 delta → reply,replace/append)
 ///   - `Notification`     → wait / ignore  (按 notification_type:permission 才 wait,idle 忽略)
 ///   - `Stop`/`SessionEnd`/`SubagentStop` → done  (turn / 会话 / 子任务正常结束)
@@ -31,7 +32,8 @@ struct ClaudeHookEvent {
     /// 从 hook 事件派生出的中立动作。
     enum Action: Equatable {
         case start(prompt: String?)
-        case update(tool: String?, detail: String?, reply: String?, replyAppend: Bool, toolComplete: Bool)
+        case update(tool: String?, detail: String?, reply: String?, replyAppend: Bool,
+                    toolComplete: Bool, toolFailed: Bool = false, toolError: String? = nil)
         case wait(message: String?)
         case done(reply: String?)
         case fail(errorKind: String?, errorDetail: String?, reply: String?)
@@ -96,6 +98,16 @@ struct ClaudeHookEvent {
             let tool = Self.string(dict, "tool_name")
             let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
             action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false, toolComplete: true)
+
+        case "PostToolUseFailure":
+            // 工具执行失败(抛错/返回失败)。字段同 PostToolUse(tool_name/tool_input)+ 顶层 `error`(失败原因)。
+            // 工具失败是常态、不代表 agent loop 中断 → 仍是 update→working(非终态),只是 UI 打 ✗ 而非 ✓。
+            // 失败原因塞进 toolError(仅作 activity 行 tooltip,不进可见正文,守 popover 紧凑)。
+            let tool = Self.string(dict, "tool_name")
+            let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
+            let error = Self.string(dict, "error")
+            action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false,
+                             toolComplete: true, toolFailed: true, toolError: error)
 
         case "MessageDisplay":
             // 助手文本流式输出:delta 是增量。新消息首批(index==0)替换,后续追加。

@@ -52,13 +52,16 @@
   "reply":       "string?  // agent 回复文本(或增量)",
   "replyAppend": "bool?    // true=追加到现有回复,false/缺省=替换",
   "toolComplete": "bool? // true=当前动作(工具调用)已完成 → UI 在动作行打 ✓;缺省=进行中",
+  "toolFailed": "bool?   // true=当前动作(工具调用)失败 → UI 在动作行改打 ✗(优先于 ✓);缺省=未失败",
+  "toolError":  "string? // 当前动作失败原因(best-effort);仅作动作行 tooltip,不进可见正文",
   "parentId":    "string?  // 子任务关联(漏了 start 时也能把子任务建对)"
 }
 ```
 效果:upsert 该任务,`status = working`。若原为 `waiting`/`done`/`failed`,则**复活接管**(恢复阻止休眠、清除等待/失败痕迹)。刷新展示用的"当前动作"与回复。
 
-> `toolComplete` 仅影响动作行的 ✓ 展示,**不改变 status**:任务仍 `working`、仍阻止休眠;整任务的完成是 `done`。
+> `toolComplete` / `toolFailed` 仅影响动作行的 ✓/✗ 展示,**不改变 status**:任务仍 `working`、仍阻止休眠;整任务的完成是 `done`、整任务的失败是 `fail`。
 > 配对用法(对应 Claude 的 `PreToolUse`/`PostToolUse`):工具开始发 `toolComplete:false`、工具结束发 `toolComplete:true`。只发其一也可——只发结束即"做完才显示并打 ✓"。
+> **工具失败**(对应 Claude 的 `PostToolUseFailure`):发 `toolFailed:true`(+ 可选 `toolError`)→ 动作行打 ✗。工具失败是 agent loop 里的常态、**不代表任务中断**,所以仍是 `update`/`working`,只是动作行的标记不同;真正的任务级失败用 `fail`。每条新动作(新 `tool`/`reply`)会覆盖上一条的 ✓/✗ 标记。
 
 > upsert 语义是刻意的:即使漏收了 `start`(BusyElf 中途启动),一条 `update` 也能建/恢复任务、重新阻止休眠——**宁可多醒,不可漏醒**。
 > 流式回复:`reply` + `replyAppend` 是通用 replace/append 原语——中立客户端直接发完整 `reply`(replace 即可)即可,无需增量概念。

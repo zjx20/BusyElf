@@ -65,7 +65,7 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 
 **子任务(subagent)**:把子 id 折进 `id`(`"父id#子id"`)+ `parentId` 表达;有 `parentId` 即子任务。折叠只发生在适配器边界,核心层无感。
 
-**Claude 适配映射**(`ClaudeHookEvent.swift`):`UserPromptSubmit`→start、`SubagentStart`→start(子)、`PostToolUse`→update、`MessageDisplay`→update(reply)、`Notification`(读 `notification_type`:permission→wait / idle→忽略)、`Stop`/`SubagentStop`/`SessionEnd`→done、`StopFailure`→fail。subagent 靠 `agent_id`/`agent_type`,**session_id 与父相同**。
+**Claude 适配映射**(`ClaudeHookEvent.swift`):`UserPromptSubmit`→start、`SubagentStart`→start(子)、`PreToolUse`/`PostToolUse`→update(✓)、`PostToolUseFailure`→update(✗,工具失败是常态非中断,仍 working)、`MessageDisplay`→update(reply)、`Notification`(读 `notification_type`:permission→wait / idle→忽略)、`Stop`/`SubagentStop`/`SessionEnd`→done、`StopFailure`→fail。subagent 靠 `agent_id`/`agent_type`,**session_id 与父相同**。
 
 ---
 

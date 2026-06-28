@@ -54,6 +54,8 @@ final class TaskStore {
             s.reply = nil          // 新 turn:旧回复作废
             s.activity = ""        // 新 turn:旧动作作废
             s.toolComplete = false  // 新 turn:旧动作的 ✓ 作废
+            s.toolFailed = false    // 新 turn:旧动作的 ✗ 作废
+            s.toolError = nil       // 新 turn:旧失败原因作废
             if let prompt, !prompt.isEmpty { s.prompt = prompt }
             self.applyMeta(&s, parentId: parentId, name: name, agent: agent, cwd: cwd)
             s.lastSeen = now
@@ -69,6 +71,7 @@ final class TaskStore {
                 tool: String?, detail: String?,
                 reply: String?, replyAppend: Bool,
                 toolComplete: Bool = false,
+                toolFailed: Bool = false, toolError: String? = nil,
                 agent: String?, cwd: String?) {
         queue.async {
             let now = Date()
@@ -79,10 +82,13 @@ final class TaskStore {
                 s.reply = replyAppend ? ((s.reply ?? "") + reply) : reply
             }
             // 当前动作主行:有工具用"工具: 细节",否则退化到最新回复。
-            // toolComplete 只在真正写入新动作那一刻同步(纯元数据更新不误清 ✓)。
+            // toolComplete/toolFailed/toolError 只在真正写入新动作那一刻同步(纯元数据更新不误清 ✓/✗;
+            // 新动作覆盖旧的失败标记,避免上一个失败工具的 ✗ 残留到下一个动作)。
             if let act = Self.activity(tool: tool, detail: detail, reply: s.reply) {
                 s.activity = act
                 s.toolComplete = toolComplete
+                s.toolFailed = toolFailed
+                s.toolError = toolError
             }
             self.applyMeta(&s, parentId: parentId, name: name, agent: agent, cwd: cwd)
             s.lastSeen = now
@@ -276,6 +282,8 @@ final class TaskStore {
         if let v = s.prompt { d["prompt"] = v }
         if !s.activity.isEmpty { d["activity"] = s.activity }
         d["toolComplete"] = s.toolComplete
+        d["toolFailed"] = s.toolFailed
+        if let v = s.toolError { d["toolError"] = v }
         if let v = s.reply { d["reply"] = v }
         if let v = s.waitingMessage { d["waitingMessage"] = v }
         if let v = s.errorKind { d["errorKind"] = v }

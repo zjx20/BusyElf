@@ -49,6 +49,7 @@ struct Router {
                          tool: event.tool, detail: event.toolInput ?? event.detail,
                          reply: event.reply, replyAppend: event.replyAppend ?? false,
                          toolComplete: event.toolComplete ?? false,
+                         toolFailed: event.toolFailed ?? false, toolError: event.toolError,
                          agent: event.agent, cwd: event.cwd)
         case .wait:
             store.wait(id: id, message: event.message, parentId: event.parentId,
@@ -74,10 +75,10 @@ struct Router {
         case .start(let prompt):
             store.start(id: id, parentId: hook.parentId, name: hook.name,
                         prompt: prompt, agent: agent, cwd: hook.cwd)
-        case .update(let tool, let detail, let reply, let replyAppend, let toolComplete):
+        case .update(let tool, let detail, let reply, let replyAppend, let toolComplete, let toolFailed, let toolError):
             store.update(id: id, parentId: hook.parentId, name: hook.name,
                          tool: tool, detail: detail, reply: reply, replyAppend: replyAppend,
-                         toolComplete: toolComplete,
+                         toolComplete: toolComplete, toolFailed: toolFailed, toolError: toolError,
                          agent: agent, cwd: hook.cwd)
         case .wait(let message):
             store.wait(id: id, message: message, parentId: hook.parentId,

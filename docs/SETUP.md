@@ -25,6 +25,7 @@
     "UserPromptSubmit": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "PreToolUse":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "MessageDisplay":   [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "Notification":     [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "SubagentStart":    [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
@@ -56,6 +57,7 @@
 | `StopFailure` | turn 因 API 错误异常停止 → **红点紧急提示**,展示失败原因(rate_limit 等)与细节 |
 | `PreToolUse` | popover **即时**显示"正在做的工具"(工具开始时,不等它做完) |
 | `PostToolUse` | 把该工具标为已完成(行内 ✓);并在权限等待结束后把任务从"等待"复活为"工作中" |
+| `PostToolUseFailure` | 把该工具标为失败(行内 ✗,hover 看失败原因);工具失败是常态、不代表任务中断,任务仍"工作中" |
 | `MessageDisplay` | popover 实时显示 agent 当前回复(话痨:每行助手文本发一发;精简显示,可去掉) |
 | `Notification` | 权限等待期间放行休眠并系统提醒 |
 | `SubagentStart` / `SubagentStop` | 把 subagent(如 Explore)显示为独立子任务行,挂在父任务下 |

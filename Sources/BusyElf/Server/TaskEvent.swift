@@ -17,6 +17,8 @@ struct TaskEvent {
     var reply: String?          // 回复文本(或增量)
     var replyAppend: Bool?      // true=追加到现有回复,false/缺省=替换
     var toolComplete: Bool?   // true=当前动作(工具调用)已完成 → UI 打 ✓;缺省=进行中
+    var toolFailed: Bool?     // true=当前动作(工具调用)失败 → UI 改打 ✗(优先于 ✓);缺省=未失败
+    var toolError: String?    // 当前动作失败原因(best-effort,仅作 tooltip);常态非终态
     var message: String?        // wait 文案
     var errorKind: String?      // 失败类型
     var errorDetail: String?    // 失败细节
@@ -59,6 +61,8 @@ struct TaskEvent {
         e.reply = str("reply")
         e.replyAppend = bool("replyAppend")
         e.toolComplete = bool("toolComplete")
+        e.toolFailed = bool("toolFailed")
+        e.toolError = str("toolError")
         e.message = str("message")
         e.errorKind = str("errorKind")
         e.errorDetail = str("errorDetail")

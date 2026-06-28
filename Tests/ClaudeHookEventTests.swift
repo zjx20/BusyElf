@@ -45,6 +45,21 @@ final class ClaudeHookEventTests: XCTestCase {
         XCTAssertEqual(e?.action, .update(tool: "Grep", detail: "foo", reply: nil, replyAppend: false, toolComplete: true))
     }
 
+    func testPostToolUseFailure() {
+        // 工具执行失败 → update,toolComplete=true + toolFailed=true(打 ✗),error 进 toolError。仍是 working(非终态)。
+        let e = parse(#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Bash","tool_input":{"command":"npm test"},"error":"exit 1"}"#)
+        XCTAssertEqual(e?.id, "s")
+        XCTAssertEqual(e?.action, .update(tool: "Bash", detail: "npm test", reply: nil, replyAppend: false,
+                                          toolComplete: true, toolFailed: true, toolError: "exit 1"))
+    }
+
+    /// 失败原因缺失也安全降级:toolFailed 仍 true,toolError 为 nil。
+    func testPostToolUseFailureWithoutError() {
+        let e = parse(#"{"hook_event_name":"PostToolUseFailure","session_id":"s","tool_name":"Edit","tool_input":{"file_path":"a.swift"}}"#)
+        XCTAssertEqual(e?.action, .update(tool: "Edit", detail: "a.swift", reply: nil, replyAppend: false,
+                                          toolComplete: true, toolFailed: true, toolError: nil))
+    }
+
     func testMessageDisplayReplaceThenAppend() {
         let first = parse(#"{"hook_event_name":"MessageDisplay","session_id":"s","index":0,"delta":"X"}"#)
         XCTAssertEqual(first?.action, .update(tool: nil, detail: nil, reply: "X", replyAppend: false, toolComplete: false))

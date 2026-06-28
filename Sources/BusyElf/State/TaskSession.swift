@@ -17,6 +17,8 @@ struct TaskSession: Identifiable {
     var name: String            // 任务名 / 子任务标签(如 "Explore");best-effort
     var activity: String        // 当前动作主行:工具+细节 或 最近回复(best-effort)
     var toolComplete: Bool = false // 当前动作(工具调用)是否已完成 → UI 在 activity 前打 ✓。纯展示:任务仍 working、仍阻止休眠
+    var toolFailed: Bool = false   // 当前动作(工具调用)是否失败 → UI 改打 ✗(优先于 ✓)。纯展示:工具失败是常态,不是终态,任务仍 working、仍阻止休眠
+    var toolError: String?         // 当前动作失败原因(best-effort);仅作 activity 行 tooltip 展示,不进可见正文
     var waitingMessage: String? // wait 时需要用户做什么
     var status: TaskStatus
     let startedAt: Date
