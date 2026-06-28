@@ -20,11 +20,11 @@ final class Notifier {
     /// 用任务的 id 作通知标识 → 同一任务重复进入 waiting 只会替换而非堆叠。
     func notifyWaiting(_ session: TaskSession) {
         let content = UNMutableNotificationContent()
-        content.title = "🔔 \(session.projectName)"
+        content.title = L.Notify.waitingTitle(session.projectName)
         if let message = session.waitingMessage, !message.isEmpty {
             content.body = message
         } else {
-            content.body = "需要你处理"
+            content.body = L.Notify.waitingBody
         }
         content.sound = .default
 
@@ -43,9 +43,9 @@ final class Notifier {
     /// 任务异常停止(StopFailure)→ 发紧急横幅。去抖由 TaskStore 负责(只在 →failed 跳变回调)。
     func notifyFailed(_ session: TaskSession) {
         let content = UNMutableNotificationContent()
-        content.title = "⚠️ \(session.projectName) 执行失败"
+        content.title = L.Notify.failedTitle(session.projectName)
         let kind = session.errorKind.map { "[\($0)] " } ?? ""
-        let detail = session.errorDetail ?? session.reply ?? "agent 异常停止"
+        let detail = session.errorDetail ?? session.reply ?? L.Notify.failedFallback
         content.body = kind + detail
         content.sound = .default
 

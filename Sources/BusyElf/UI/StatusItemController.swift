@@ -68,7 +68,7 @@ final class StatusItemController {
             button.contentTintColor = nil
             button.title = ""
             button.alphaValue = 0.45
-            button.toolTip = "BusyElf · 空闲,允许休眠"
+            button.toolTip = L.Tip.idle
             return
         }
 
@@ -130,10 +130,10 @@ final class StatusItemController {
 
     private static func tooltip(working: Int, waiting: Int, badge: StatusBadge) -> String {
         var parts: [String] = []
-        if working > 0 { parts.append("\(working) 个在干活(阻止休眠)") }
-        if waiting > 0 { parts.append("\(waiting) 个等你处理") }
-        if badge.hasUnseenFailed { parts.append("有失败,点开查看") }
-        else if badge.hasUnseenDone { parts.append("有完成,点开查看") }
+        if working > 0 { parts.append(L.Tip.working(working)) }
+        if waiting > 0 { parts.append(L.Tip.waiting(waiting)) }
+        if badge.hasUnseenFailed { parts.append(L.Tip.hasFailed) }
+        else if badge.hasUnseenDone { parts.append(L.Tip.hasDone) }
         if parts.isEmpty { return "BusyElf" }
         return "BusyElf · " + parts.joined(separator: " · ")
     }

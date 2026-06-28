@@ -32,6 +32,27 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(AppConfig.resolveListenAll(env: "garbage", stored: true)) // env 无法解析 → 退 stored
     }
 
+    func testResolveLanguage() {
+        XCTAssertEqual(AppConfig.resolveLanguage(env: nil, stored: nil), .auto)             // 未设 → auto
+        XCTAssertEqual(AppConfig.resolveLanguage(env: nil, stored: "english"), .english)
+        XCTAssertEqual(AppConfig.resolveLanguage(env: nil, stored: "chinese"), .chinese)
+        XCTAssertEqual(AppConfig.resolveLanguage(env: "zh", stored: "english"), .chinese)   // env 优先
+        XCTAssertEqual(AppConfig.resolveLanguage(env: "en", stored: "chinese"), .english)
+        XCTAssertEqual(AppConfig.resolveLanguage(env: "zh-Hant", stored: nil), .chinese)    // 繁体也归 chinese
+        XCTAssertEqual(AppConfig.resolveLanguage(env: "auto", stored: "chinese"), .auto)    // 显式 auto 覆盖 stored
+        XCTAssertEqual(AppConfig.resolveLanguage(env: "garbage", stored: "chinese"), .chinese) // env 坏值 → 退 stored
+        XCTAssertEqual(AppConfig.resolveLanguage(env: nil, stored: "weird"), .auto)         // stored 坏值 → auto
+    }
+
+    func testPrefersChinese() {
+        XCTAssertTrue(AppConfig.prefersChinese(preferred: ["zh-Hans-CN", "en"]))
+        XCTAssertTrue(AppConfig.prefersChinese(preferred: ["zh-Hant-TW"]))
+        XCTAssertTrue(AppConfig.prefersChinese(preferred: ["zh"]))
+        XCTAssertFalse(AppConfig.prefersChinese(preferred: ["en-US", "zh-Hans"]))   // 仅看 first
+        XCTAssertFalse(AppConfig.prefersChinese(preferred: []))                     // 空 → 英文兜底
+        XCTAssertFalse(AppConfig.prefersChinese(preferred: ["ja-JP"]))
+    }
+
     // MARK: - LoopbackServer
 
     func testCandidatePortsPreferredFirstDeduped() {

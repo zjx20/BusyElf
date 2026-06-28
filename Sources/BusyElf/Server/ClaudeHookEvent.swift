@@ -152,9 +152,9 @@ struct ClaudeHookEvent {
             let tool = Self.string(dict, "tool_name")
             let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
             if let tool {
-                action = .wait(message: detail.map { "需批准 \(tool):\($0)" } ?? "需批准 \(tool)")
+                action = .wait(message: L.Wait.approveTool(tool, detail: detail))
             } else {
-                action = .wait(message: "需批准工具调用")
+                action = .wait(message: L.Wait.approveToolGeneric)
             }
 
         case "Stop", "SessionEnd", "SubagentStop":
@@ -225,7 +225,7 @@ struct ClaudeHookEvent {
         if let questions = input?["questions"] as? [[String: Any]], let first = questions.first {
             return string(first, "question") ?? string(first, "header")
         }
-        if tool == "ExitPlanMode" { return "等待批准计划" }
+        if tool == "ExitPlanMode" { return L.Wait.approvePlan }
         return nil
     }
 

@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let p = self?.server?.port, p != 0 else { return nil }
             return "\(AppConfig.shared.listenOnAllInterfaces ? "0.0.0.0" : "127.0.0.1"):\(p)"
         }
+        controller.onLanguageChange = { [weak self] lang in self?.applyLanguage(lang) }
         controller.update(sessions: latestSessions)   // 喂入当前快照
         popover.contentViewController = controller
         popoverController = controller
@@ -93,6 +94,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleStoreChange(_ sessions: [TaskSession]) {
         latestSessions = sessions
+        refreshStatus(sessions)
+        popoverController?.update(sessions: sessions)   // 仅在已创建时刷新
+    }
+
+    /// 按最新快照重算菜单栏图标(数字 / 角标 / tooltip)。store 变更与语言切换共用。
+    private func refreshStatus(_ sessions: [TaskSession]) {
         // 疑似已断(stalled)的 working 不再算"在干活":图标不显忙(与"已放行休眠"一致)。
         let now = Date()
         let timeout = AppConfig.shared.inactivityTimeout
@@ -104,7 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hasUnseenFailed: sessions.contains { $0.status == .failed && !$0.seen },
             hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen })
         statusController.refresh(workingCount: working, waitingCount: waiting, badge: badge)
-        popoverController?.update(sessions: sessions)   // 仅在已创建时刷新
+    }
+
+    /// 语言切换:持久化 + 立即刷新菜单栏图标 tooltip + popover(若已开着);右键菜单靠下次重建。
+    private func applyLanguage(_ lang: AppConfig.Language) {
+        AppConfig.shared.setLanguage(lang)
+        refreshStatus(latestSessions)
+        popoverController?.rebuildForLanguageChange()
     }
 
     // MARK: - 状态栏点击:左键 popover / 右键菜单
@@ -134,22 +147,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         // 每次弹出都重建菜单,勾选状态从真相源(SleepGuard / LoginItem)现取,故不会过期。
         let menu = NSMenu()
-        menu.addItem(withTitle: "打开面板", action: #selector(openPopoverFromMenu), keyEquivalent: "")
+        menu.addItem(withTitle: L.Menu.openPanel, action: #selector(openPopoverFromMenu), keyEquivalent: "")
             .target = self
 
         menu.addItem(.separator())
 
         let displayItem = NSMenuItem(
-            title: "保持屏幕唤醒", action: #selector(toggleKeepDisplayAwakeFromMenu), keyEquivalent: "")
+            title: L.Footer.keepDisplayAwake, action: #selector(toggleKeepDisplayAwakeFromMenu), keyEquivalent: "")
         displayItem.target = self
         displayItem.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
         menu.addItem(displayItem)
 
         let loginItem = NSMenuItem(
-            title: "开机启动", action: #selector(toggleLaunchAtLoginFromMenu), keyEquivalent: "")
+            title: L.Footer.launchAtLogin, action: #selector(toggleLaunchAtLoginFromMenu), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = LoginItem.isEnabled ? .on : .off
         menu.addItem(loginItem)
+
+        // 语言子菜单:Auto / English / 中文 互斥勾选(当前项打勾)。
+        let languageItem = NSMenuItem(title: L.Menu.language, action: nil, keyEquivalent: "")
+        let languageMenu = NSMenu()
+        let langs: [(String, AppConfig.Language)] = [
+            (L.Footer.langAuto, .auto), ("English", .english), ("中文", .chinese),
+        ]
+        for (title, lang) in langs {
+            let item = NSMenuItem(title: title, action: #selector(selectLanguageFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = lang.rawValue
+            item.state = AppConfig.shared.language == lang ? .on : .off
+            languageMenu.addItem(item)
+        }
+        languageItem.submenu = languageMenu
+        menu.addItem(languageItem)
 
         menu.addItem(.separator())
 
@@ -157,23 +186,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let addr: String
         if let p = server?.port, p != 0 {
             let host = AppConfig.shared.listenOnAllInterfaces ? "0.0.0.0" : "127.0.0.1"
-            addr = "监听:\(host):\(p)"
+            addr = L.Menu.listening(host: host, port: p)
         } else {
-            addr = "监听:未就绪"
+            addr = L.Menu.notReady
         }
         menu.addItem(NSMenuItem(title: addr, action: nil, keyEquivalent: ""))
 
         let listenAllItem = NSMenuItem(
-            title: "监听所有网口 (0.0.0.0)", action: #selector(toggleListenAllFromMenu), keyEquivalent: "")
+            title: L.Footer.listenAll, action: #selector(toggleListenAllFromMenu), keyEquivalent: "")
         listenAllItem.target = self
         listenAllItem.state = AppConfig.shared.listenOnAllInterfaces ? .on : .off
-        listenAllItem.toolTip = "允许局域网内其它机器/容器上报任务(无鉴权,会触发系统本地网络授权弹窗)"
+        listenAllItem.toolTip = L.Menu.listenAllTip
         menu.addItem(listenAllItem)
 
         menu.addItem(.separator())
-        menu.addItem(withTitle: "关于 BusyElf", action: #selector(showAbout), keyEquivalent: "")
+        menu.addItem(withTitle: L.Menu.about, action: #selector(showAbout), keyEquivalent: "")
             .target = self
-        menu.addItem(withTitle: "退出 BusyElf", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: L.Menu.quit, action: #selector(quit), keyEquivalent: "q")
             .target = self
 
         // 临时挂菜单并触发弹出,弹完即清空,保证下次左键仍走 action。
@@ -197,6 +226,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 切换并持久化,然后热重启监听让新网口配置生效。
         AppConfig.shared.setListenOnAllInterfaces(!AppConfig.shared.listenOnAllInterfaces)
         server?.restart()
+    }
+
+    @objc private func selectLanguageFromMenu(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let lang = AppConfig.Language(rawValue: raw) else { return }
+        applyLanguage(lang)
     }
 
     @objc private func openPopoverFromMenu() {

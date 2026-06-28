@@ -95,12 +95,10 @@ final class AgentRowView: HoverRow {
     private func applyTimeVarying() {
         let stalled = self.stalled
         stuckIcon.isHidden = !(stalled || session.isStuck(asOf: now))
-        stuckIcon.toolTip = stalled
-            ? "超过无响应阈值,已放行休眠(收到新进展会自动恢复)"
-            : "长时间无进展,可能已卡死"
+        stuckIcon.toolTip = stalled ? L.Row.stalledTip : L.Row.stuckTip
         if session.status == .working {
             dot.color = stalled ? .systemGray : .systemGreen
-            dot.toolTip = stalled ? "可能已断 · 已放行休眠" : "在干活"
+            dot.toolTip = stalled ? L.Row.stalledDot : L.Row.working
         }
         thirdLabel.stringValue = thirdLineText()
     }
@@ -113,10 +111,10 @@ final class AgentRowView: HoverRow {
 
         // 状态点(done 例外:显示绿色 ✓ 而非圆点,见 statusSlot)
         switch status {
-        case .working: dot.color = .systemGreen;  dot.toolTip = "在干活"
-        case .waiting: dot.color = .systemOrange; dot.toolTip = "等你处理"
-        case .done:    dot.color = .systemGreen;  dot.toolTip = "已完成"
-        case .failed:  dot.color = .systemRed;    dot.toolTip = "执行失败"
+        case .working: dot.color = .systemGreen;  dot.toolTip = L.Row.working
+        case .waiting: dot.color = .systemOrange; dot.toolTip = L.Row.waiting
+        case .done:    dot.color = .systemGreen;  dot.toolTip = L.Row.done
+        case .failed:  dot.color = .systemRed;    dot.toolTip = L.Row.failed
         }
         // done 显示 ✓、隐藏圆点;其余三态显示圆点、隐藏 ✓(行对象复用,故每次都要显式切回)
         let isDone = (status == .done)
@@ -146,28 +144,36 @@ final class AgentRowView: HoverRow {
         // 主信息行(全部 2 行封顶、尾部截断)
         switch status {
         case .waiting:
-            let msg = firstNonEmpty(session.waitingMessage) ?? "需要你处理"
+            let msg = firstNonEmpty(session.waitingMessage) ?? L.Row.needsYou
             setSecond(msg, color: .systemOrange, tip: session.waitingMessage)
         case .failed:
-            let detail = firstNonEmpty(session.errorDetail, session.reply) ?? "执行失败"
+            let detail = firstNonEmpty(session.errorDetail, session.reply) ?? L.Row.failed
             setSecond(detail, color: .systemRed, tip: firstNonEmpty(session.errorDetail, session.reply))
         case .done:
-            let r = firstNonEmpty(session.reply) ?? "已完成"
+            let r = firstNonEmpty(session.reply) ?? L.Row.done
             setSecond(r, color: .secondaryLabelColor, tip: session.reply)
         case .working:
             let hasAct = !session.activity.isEmpty
-            let act = hasAct ? session.activity : "在思考…"
+            let act = hasAct ? session.activity : L.Row.thinking
             // 这一步(工具调用)的标记:失败前缀 ✗(优先),完成前缀 ✓;仅标"这一步如何",任务仍 working、仍阻止休眠。
             // 工具失败是常态,不是终态(不变红、不弹横幅),只是动作行多一个 ✗。失败原因(若有)挂 tooltip。
             let shown: String
             if hasAct && session.toolFailed { shown = "✗ " + act }
             else if hasAct && session.toolComplete { shown = "✓ " + act }
             else { shown = act }
-            let tip = firstNonEmpty(session.toolError).map { "\(session.activity)\n失败:\($0)" } ?? session.activity
+            let tip = firstNonEmpty(session.toolError).map { L.Row.toolFailedTip(session.activity, reason: $0) } ?? session.activity
             setSecond(shown, color: hasAct ? .labelColor : .secondaryLabelColor, tip: tip)
         }
 
         applyTimeVarying()   // 状态点(working 已断转灰)/ ⚠ 图标 / 第三行,随时间变化
+
+        // 这些 tooltip/标题在 makeContentView 构建时写死、rebuild 不重设;在此统一重设,
+        // 使语言切换(经 update→apply)也能刷新它们(行按 id 复用,不重建)。
+        checkView.toolTip = L.Row.done
+        subtaskArrow.toolTip = L.Row.subtaskTip
+        errorBadge.toolTip = L.Row.errorKindTip
+        xButton.toolTip = L.Row.removeTip
+        cancelButton.title = L.Footer.cancel
     }
 
     private func setSecond(_ text: String, color: NSColor, tip: String?) {
@@ -185,15 +191,15 @@ final class AgentRowView: HoverRow {
 
     /// 子任务标题:优先 name(agentType,如 "Explore"),退化到 "子任务"。
     private func subtaskLabel() -> String {
-        session.name.isEmpty ? "子任务" : session.name
+        session.name.isEmpty ? L.Row.subtask : session.name
     }
 
     private func thirdLineText() -> String {
         var parts: [String] = []
-        if stalled { parts.append("可能已断") }   // 看门狗已放行休眠;收到新进展会自动恢复
+        if stalled { parts.append(L.Row.stalledShort) }   // 看门狗已放行休眠;收到新进展会自动恢复
         switch session.status {
-        case .done:   parts.append("完成")
-        case .failed: parts.append("失败")
+        case .done:   parts.append(L.Row.doneShort)
+        case .failed: parts.append(L.Row.failedShort)
         default:      break
         }
         if let agent = session.agent, !agent.isEmpty { parts.append(agent) }
@@ -205,7 +211,7 @@ final class AgentRowView: HoverRow {
 
     private func confirmWarnText() -> String {
         guard session.looksActive(asOf: now) else { return "" }
-        return "⚠ 该任务似乎仍在活动(\(Format.ago(session.sinceLastSeen(asOf: now)))还有进展),仍要移除?"
+        return L.Row.activeWarn(Format.ago(session.sinceLastSeen(asOf: now)))
     }
 
     private func firstNonEmpty(_ values: String?...) -> String? {
@@ -220,7 +226,7 @@ final class AgentRowView: HoverRow {
         checkView.image = UI.symbol("checkmark", size: 11, weight: .bold)
         checkView.contentTintColor = .systemGreen
         checkView.translatesAutoresizingMaskIntoConstraints = false
-        checkView.toolTip = "已完成"
+        checkView.toolTip = L.Row.done
         checkView.isHidden = true
         checkView.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -244,16 +250,16 @@ final class AgentRowView: HoverRow {
         stuckIcon.image = UI.symbol("exclamationmark.triangle.fill", size: 10)
         stuckIcon.contentTintColor = .systemYellow
         stuckIcon.translatesAutoresizingMaskIntoConstraints = false
-        stuckIcon.toolTip = "长时间无进展,可能已卡死"
+        stuckIcon.toolTip = L.Row.stuckTip
         stuckIcon.setContentHuggingPriority(.required, for: .horizontal)
 
         subtaskArrow.setContentHuggingPriority(.required, for: .horizontal)
-        subtaskArrow.toolTip = "子任务(subagent)"
+        subtaskArrow.toolTip = L.Row.subtaskTip
 
         errorBadge.isHidden = true
         errorBadge.setContentHuggingPriority(.required, for: .horizontal)
         errorBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
-        errorBadge.toolTip = "失败类型"
+        errorBadge.toolTip = L.Row.errorKindTip
 
         xButton.image = UI.symbol("xmark.circle.fill", size: 13)
         xButton.isBordered = false
@@ -262,7 +268,7 @@ final class AgentRowView: HoverRow {
         xButton.contentTintColor = xButton.normalTint
         xButton.target = self
         xButton.action = #selector(startConfirm)
-        xButton.toolTip = "移除此任务(解除休眠阻止,不杀进程)"
+        xButton.toolTip = L.Row.removeTip
         xButton.setContentHuggingPriority(.required, for: .horizontal)
 
         // 行内确认按钮(默认隐藏;点 × 后显示在 × 原位)。用标准小号圆角按钮,一看就是可点的按钮。
@@ -273,11 +279,11 @@ final class AgentRowView: HoverRow {
             b.setContentHuggingPriority(.required, for: .horizontal)
             b.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
-        confirmButton.title = "确认移除"
+        confirmButton.title = L.Row.confirmRemove
         confirmButton.bezelColor = .systemRed       // 红底,destructive 一目了然
         confirmButton.target = self
         confirmButton.action = #selector(doRemove)
-        cancelButton.title = "取消"
+        cancelButton.title = L.Footer.cancel
         cancelButton.target = self
         cancelButton.action = #selector(cancelConfirm)
 
@@ -339,7 +345,7 @@ final class AgentRowView: HoverRow {
     /// 按"是否看起来仍活跃"调确认按钮文案/提示:活跃时加 ⚠ 前缀 + 警示 tooltip。
     private func updateConfirmAppearance() {
         let active = session.looksActive(asOf: now)
-        confirmButton.title = active ? "⚠ 确认移除" : "确认移除"
-        confirmButton.toolTip = active ? confirmWarnText() : "移除此任务(解除休眠阻止,不杀进程)"
+        confirmButton.title = active ? L.Row.confirmRemoveActive : L.Row.confirmRemove
+        confirmButton.toolTip = active ? confirmWarnText() : L.Row.removeTip
     }
 }

@@ -50,7 +50,7 @@ final class ClaudeHookEventTests: XCTestCase {
     func testPreToolUseExitPlanModeWaits() {
         // ExitPlanMode 阻塞等批准 → wait,固定提示"等待批准计划"。
         let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"ExitPlanMode","tool_input":{"plan":"第一步..."}}"#)
-        XCTAssertEqual(e?.action, .wait(message: "等待批准计划"))
+        XCTAssertEqual(e?.action, .wait(message: L.Wait.approvePlan))
     }
 
     func testPostToolUseAskUserQuestionRevivesToWorking() {
@@ -110,13 +110,13 @@ final class ClaudeHookEventTests: XCTestCase {
         // 真实权限弹窗走 PermissionRequest(非 Notification)→ wait;文案=需批准 工具:细节。
         let e = parse(#"{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"Bash","tool_input":{"command":"python3 -c x"}}"#)
         XCTAssertEqual(e?.id, "s")
-        XCTAssertEqual(e?.action, .wait(message: "需批准 Bash:python3 -c x"))
+        XCTAssertEqual(e?.action, .wait(message: L.Wait.approveTool("Bash", detail: "python3 -c x")))
     }
 
     func testPermissionRequestWithoutDetail() {
         // 取不到细节也安全:只用工具名。
         let e = parse(#"{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"WebFetch","tool_input":{}}"#)
-        XCTAssertEqual(e?.action, .wait(message: "需批准 WebFetch"))
+        XCTAssertEqual(e?.action, .wait(message: L.Wait.approveTool("WebFetch", detail: nil)))
     }
 
     func testStopMapsToDoneWithReply() {

@@ -293,6 +293,24 @@ else
   FAIL=$((FAIL+1)); printf "  ${RED}✗ 自定义端口 %s 不可达${RST}\n" "$CUSTOM_PORT"
 fi
 
+group "配置:语言 env(BUSYELF_LANGUAGE=zh 不破坏启动)"
+# i18n 是纯展示层,/debug/state(中立核心)不含任何文案,故 E2E 只能冒烟"设了语言也能正常启动不崩",
+# 译文正确性归单元测试(LocalizationTests / ConfigTests)。
+LANG_PORT=18932
+BUSYELF_DEBUG=1 BUSYELF_LANGUAGE=zh BUSYELF_HTTP_PORT=$LANG_PORT "$BIN" >/dev/null 2>&1 &
+LANG_PID=$!
+lang_ok=""
+for _ in $(seq 1 25); do
+  if curl -sS -m1 "http://127.0.0.1:$LANG_PORT/debug/state" 2>/dev/null | grep -q '"blocking"'; then lang_ok=1; break; fi
+  sleep 0.2
+done
+kill "$LANG_PID" 2>/dev/null; wait "$LANG_PID" 2>/dev/null
+if [ -n "$lang_ok" ]; then
+  PASS=$((PASS+1)); printf "  ${GREEN}✓${RST} BUSYELF_LANGUAGE=zh 实例正常启动\n"
+else
+  FAIL=$((FAIL+1)); printf "  ${RED}✗ BUSYELF_LANGUAGE=zh 实例启动失败${RST}\n"
+fi
+
 group "容错:坏 body / 缺 id 仍 200 不崩、不影响状态"
 reset
 curl -sS -m3 -o /dev/null -w '' -X POST "$BASE/v1/task/start" -d 'not-json'

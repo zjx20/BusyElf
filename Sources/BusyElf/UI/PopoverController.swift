@@ -15,11 +15,12 @@ final class PopoverController: NSViewController {
     // 头部
     private let boltIcon = NSImageView()
     private let subtitleLabel = UI.label(size: 11, color: .secondaryLabelColor)
+    private let overflowButton = NSButton()   // ⋯ 按钮;tooltip 语言相关,切换时刷新
 
     // 内容区
     private let listStack = NSStackView()
     private let scrollView = NSScrollView()
-    private let emptyView = PopoverController.makeEmptyView()
+    private var emptyView = PopoverController.makeEmptyView()   // 语言切换时整体重建,故 var
     private var listHeightConstraint: NSLayoutConstraint!   // scrollView 高度 = min(列表内容高, 320),显式承载
     private var isPopoverVisible = false                    // popover 当前是否可见(决定终态项是否即时标 seen)
     private var headerView: NSView!                         // 求和算高度用(不查整树 fittingSize)
@@ -32,6 +33,7 @@ final class PopoverController: NSViewController {
     private let displaySwitch = NSSwitch()
     private let loginSwitch = NSSwitch()
     private let listenAllSwitch = NSSwitch()
+    private let languageSeg = NSSegmentedControl()
     private let addressLabel = UI.label(size: 11, color: .secondaryLabelColor)
     private var portRow: SettingFieldRow?
     private var timeoutRow: SettingFieldRow?
@@ -43,6 +45,8 @@ final class PopoverController: NSViewController {
     /// 由 AppDelegate 注入:切网口后重启监听 / 取当前实际监听地址(端口可能回退,故运行时取)。
     var onRestartServer: (() -> Void)?
     var listenAddressProvider: (() -> String?)?
+    /// 由 AppDelegate 注入:用户在面板里切语言 → AppDelegate 持久化 + 刷新图标 tooltip + 回调 rebuildForLanguageChange。
+    var onLanguageChange: ((AppConfig.Language) -> Void)?
 
     private let contentWidth: CGFloat = 340
 
@@ -110,6 +114,47 @@ final class PopoverController: NSViewController {
     func update(sessions: [TaskSession]) {
         self.sessions = sessions
         if isViewLoaded { rebuild() }
+    }
+
+    /// 语言切换后刷新所有"构建时写死文案"的视图:整体重建 footer + emptyView(开关标题/更多设置/
+    /// 端口·超时/Quit/空态三行都是构建时写死,rebuild 不会重设),再走常规 rebuild()。
+    /// 任务行(AgentRowView)的文案由 rebuild→row.update→apply 重新派生,故无需在此特殊处理。
+    /// 由 AppDelegate 在语言切换 action 里调用(此时 popover 正开着)。
+    func rebuildForLanguageChange() {
+        guard isViewLoaded, let root = view as? NSStackView else { return }   // 没建过 UI → 下次打开自然新语言
+        let wasShowingMore = showMore
+
+        // footer/emptyView 都是 root 的 arranged subview,整体替换以刷新其内所有写死文案。
+        let newFooter = makeFooter()
+        replaceArrangedSubview(footerView, with: newFooter, in: root)
+        footerView = newFooter
+        let newEmpty = Self.makeEmptyView()
+        replaceArrangedSubview(emptyView, with: newEmpty, in: root)
+        emptyView = newEmpty
+
+        // makeFooter 复用同一批开关对象但新建了行;把状态/值同步回真相源。
+        displaySwitch.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
+        loginSwitch.state = LoginItem.isEnabled ? .on : .off
+        listenAllSwitch.state = AppConfig.shared.listenOnAllInterfaces ? .on : .off
+        portRow?.refresh()
+        timeoutRow?.refresh()
+        updateListenAddress()
+        overflowButton.toolTip = L.Footer.more   // header 不重建,单独刷新其语言相关 tooltip
+
+        // 保留"更多设置"展开态:用户正是在展开的更多设置里切的语言,别让它收起。
+        showMore = wasShowingMore
+        applyMoreState()
+        rebuild()
+    }
+
+    /// 把 stack 里的某个 arranged subview 原位换成新视图,沿用 loadView 的 leading/trailing==root 约束。
+    private func replaceArrangedSubview(_ old: NSView, with new: NSView, in stack: NSStackView) {
+        guard let idx = stack.arrangedSubviews.firstIndex(of: old) else { return }
+        stack.removeArrangedSubview(old)
+        old.removeFromSuperview()
+        stack.insertArrangedSubview(new, at: idx)
+        new.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+        new.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
     }
 
     // MARK: - 渲染
@@ -221,22 +266,22 @@ final class PopoverController: NSViewController {
         let waiting = sessions.lazy.filter { $0.status == .waiting }.count
         let failed = sessions.lazy.filter { $0.status == .failed }.count
         if sessions.isEmpty {
-            subtitleLabel.stringValue = "Idle · 允许休眠"
+            subtitleLabel.stringValue = L.Header.idle
             boltIcon.contentTintColor = .secondaryLabelColor
         } else if failed > 0 {
-            subtitleLabel.stringValue = "\(failed) 个失败 · 共 \(sessions.count) 个"
+            subtitleLabel.stringValue = L.Header.failed(failed, total: sessions.count)
             boltIcon.contentTintColor = .systemRed
         } else if working > 0 {
-            subtitleLabel.stringValue = "Blocking sleep · \(sessions.count) 个任务"
+            subtitleLabel.stringValue = L.Header.blocking(sessions.count)
             boltIcon.contentTintColor = waiting > 0 ? .systemOrange : .labelColor
         } else if waiting > 0 {
-            subtitleLabel.stringValue = "等你处理 · \(sessions.count) 个任务"
+            subtitleLabel.stringValue = L.Header.waiting(sessions.count)
             boltIcon.contentTintColor = .systemOrange
         } else if stalled > 0 {
-            subtitleLabel.stringValue = "可能已断 · 已放行休眠 · \(sessions.count) 个任务"
+            subtitleLabel.stringValue = L.Header.stalled(sessions.count)
             boltIcon.contentTintColor = .systemGray
         } else {
-            subtitleLabel.stringValue = "已完成 · \(sessions.count) 个任务"
+            subtitleLabel.stringValue = L.Header.allDone(sessions.count)
             boltIcon.contentTintColor = .systemGreen
         }
     }
@@ -291,8 +336,8 @@ final class PopoverController: NSViewController {
     }
 
     private func updateListenAddress() {
-        addressLabel.stringValue = "监听 " + (listenAddressProvider?() ?? "未就绪")
-        addressLabel.toolTip = "BusyElf 实际监听地址;把适配器/hook 的 URL 指到这里"
+        addressLabel.stringValue = L.Footer.listening(listenAddressProvider?() ?? L.Footer.notReady)
+        addressLabel.toolTip = L.Footer.listenAddrTip
     }
 
     /// 应用端口(SettingFieldRow 回车回调):合法且确有变化才重启监听。返回归一化后显示值。
@@ -332,7 +377,7 @@ final class PopoverController: NSViewController {
         chevron.setContentHuggingPriority(.required, for: .horizontal)
         moreChevron = chevron
 
-        let content = NSStackView(views: [chevron, UI.label("更多设置", size: 12), UI.hSpacer()])
+        let content = NSStackView(views: [chevron, UI.label(L.Footer.moreSettings, size: 12), UI.hSpacer()])
         content.orientation = .horizontal
         content.alignment = .centerY
         content.spacing = 6
@@ -341,6 +386,57 @@ final class PopoverController: NSViewController {
         row.onClick = { [weak self] in self?.toggleMore() }
         embed(content, in: row, insets: NSEdgeInsets(top: 7, left: 16, bottom: 7, right: 16))
         return row
+    }
+
+    /// 语言切换行(更多设置内):图标 + 标题 + 三段 Auto/EN/中文 段控件。整行不可点,直接点段控件。
+    private func makeLanguageRow() -> NSView {
+        let img = NSImageView()
+        img.image = UI.symbol("globe", size: 11)
+        img.contentTintColor = .secondaryLabelColor
+        img.translatesAutoresizingMaskIntoConstraints = false
+        img.widthAnchor.constraint(equalToConstant: 16).isActive = true
+
+        languageSeg.segmentCount = 3
+        languageSeg.setLabel(L.Footer.langAuto, forSegment: 0)
+        languageSeg.setLabel("EN", forSegment: 1)
+        languageSeg.setLabel("中文", forSegment: 2)
+        languageSeg.segmentStyle = .rounded
+        languageSeg.controlSize = .small
+        languageSeg.target = self
+        languageSeg.action = #selector(changeLanguage)
+        languageSeg.selectedSegment = Self.segIndex(AppConfig.shared.language)
+        languageSeg.setContentHuggingPriority(.required, for: .horizontal)
+
+        let content = NSStackView(views: [img, UI.label(L.Footer.language, size: 12), UI.hSpacer(), languageSeg])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: row.topAnchor, constant: 5),
+            content.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -5),
+            content.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -16),
+        ])
+        return row
+    }
+
+    private static func segIndex(_ l: AppConfig.Language) -> Int {
+        switch l { case .auto: return 0; case .english: return 1; case .chinese: return 2 }
+    }
+
+    @objc private func changeLanguage() {
+        let lang: AppConfig.Language
+        switch languageSeg.selectedSegment {
+        case 1:  lang = .english
+        case 2:  lang = .chinese
+        default: lang = .auto
+        }
+        onLanguageChange?(lang)
     }
 
     private func toggleMore() {
@@ -392,14 +488,14 @@ final class PopoverController: NSViewController {
         titleStack.spacing = 3
         titleStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let overflow = NSButton()
+        let overflow = overflowButton
         overflow.image = UI.symbol("ellipsis", size: 13)
         overflow.isBordered = false
         overflow.imagePosition = .imageOnly
         overflow.contentTintColor = .secondaryLabelColor
         overflow.target = self
         overflow.action = #selector(showOverflowMenu(_:))
-        overflow.toolTip = "更多"
+        overflow.toolTip = L.Footer.more
         overflow.translatesAutoresizingMaskIntoConstraints = false
         overflow.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -436,7 +532,7 @@ final class PopoverController: NSViewController {
         menu.addItem(versionItem)
         menu.addItem(.separator())
 
-        let about = NSMenuItem(title: "关于 BusyElf", action: #selector(showAbout), keyEquivalent: "")
+        let about = NSMenuItem(title: L.Menu.about, action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(about)
 
@@ -474,25 +570,27 @@ final class PopoverController: NSViewController {
     }
 
     private func makeFooter() -> NSView {
-        let displayRow = toggleRow(icon: "moon.fill", title: "保持屏幕唤醒",
+        let displayRow = toggleRow(icon: "moon.fill", title: L.Footer.keepDisplayAwake,
                                    sw: displaySwitch, action: #selector(toggleDisplayAwake))
-        let loginRow = toggleRow(icon: "power", title: "开机启动",
+        let loginRow = toggleRow(icon: "power", title: L.Footer.launchAtLogin,
                                  sw: loginSwitch, action: #selector(toggleLaunchAtLogin))
 
         // 不常用项折进"更多设置"(默认折叠),点一下才展开。
         let moreToggle = makeMoreToggleRow()
-        let listenRow = toggleRow(icon: "network", title: "监听所有网口 (0.0.0.0)",
+        let languageRow = makeLanguageRow()
+        let listenRow = toggleRow(icon: "network", title: L.Footer.listenAll,
                                   sw: listenAllSwitch, action: #selector(toggleListenAll))
         let addressRow = makeCaptionRow(addressLabel)
-        let port = SettingFieldRow(icon: "number", title: "端口", suffix: nil,
+        let port = SettingFieldRow(icon: "number", title: L.Footer.port, suffix: nil,
             read: { String(AppConfig.shared.preferredPort) },
             commit: { [weak self] in self?.commitPort($0) ?? String(AppConfig.shared.preferredPort) })
-        let timeout = SettingFieldRow(icon: "moon.zzz", title: "无响应超时", suffix: "分钟",
+        let timeout = SettingFieldRow(icon: "moon.zzz", title: L.Footer.timeout, suffix: L.Footer.minutes,
             read: { String(Int((AppConfig.shared.inactivityTimeout / 60).rounded())) },
             commit: { [weak self] in self?.commitTimeout($0) ?? "" })
         portRow = port; timeoutRow = timeout
 
-        let more = NSStackView(views: [loginRow, listenRow, addressRow, port, timeout])
+        // 语言切换排在"开机启动"后、网口前(比网口常用)。
+        let more = NSStackView(views: [loginRow, languageRow, listenRow, addressRow, port, timeout])
         more.orientation = .vertical
         more.alignment = .leading
         more.spacing = 0
@@ -504,7 +602,7 @@ final class PopoverController: NSViewController {
         more.isHidden = true
         moreContainer = more
 
-        let quitRow = clickableTextRow(title: "Quit BusyElf", trailing: "⌘Q") { [weak self] in self?.quit() }
+        let quitRow = clickableTextRow(title: L.Footer.quit, trailing: "⌘Q") { [weak self] in self?.quit() }
 
         let footer = NSStackView(views: [
             stopAllContainer, displayRow, moreToggle, more,
@@ -599,7 +697,7 @@ final class PopoverController: NSViewController {
         icon.image = UI.symbol("stop.circle", size: 12)
         icon.contentTintColor = .secondaryLabelColor
         icon.translatesAutoresizingMaskIntoConstraints = false
-        let label = UI.label("全部结束 (\(sessions.count))", size: 12)
+        let label = UI.label(L.Footer.stopAll(sessions.count), size: 12)
         let content = NSStackView(views: [icon, label, UI.hSpacer()])
         content.orientation = .horizontal
         content.alignment = .centerY
@@ -612,11 +710,11 @@ final class PopoverController: NSViewController {
     }
 
     private func makeStopAllConfirm() -> NSView {
-        let prompt = UI.label("结束全部 \(sessions.count) 个任务?", size: 12)
-        let stop = NSButton(title: "结束", target: self, action: #selector(doStopAll))
+        let prompt = UI.label(L.Footer.stopAllConfirm(sessions.count), size: 12)
+        let stop = NSButton(title: L.Footer.stopConfirm, target: self, action: #selector(doStopAll))
         stop.controlSize = .small
         stop.bezelColor = .systemRed
-        let cancel = NSButton(title: "取消", target: self, action: #selector(cancelStopAll))
+        let cancel = NSButton(title: L.Footer.cancel, target: self, action: #selector(cancelStopAll))
         cancel.controlSize = .small
         cancel.isBordered = false
 
@@ -633,10 +731,10 @@ final class PopoverController: NSViewController {
         hammer.image = UI.symbol("hammer.fill", size: 26)
         hammer.contentTintColor = .tertiaryLabelColor
 
-        let l1 = UI.label("工作台是空的。", size: 13, weight: .medium)
-        let l2 = UI.label("当前没有 agent 在工作。Mac 会正常 idle 休眠。", size: 11,
+        let l1 = UI.label(L.Footer.emptyTitle, size: 13, weight: .medium)
+        let l2 = UI.label(L.Footer.emptyBody, size: 11,
                           color: .secondaryLabelColor, truncates: false)
-        let l3 = UI.label("(注:合上盖子仍会休眠 — 长任务请开盖接电)", size: 10,
+        let l3 = UI.label(L.Footer.emptyHint, size: 10,
                           color: .tertiaryLabelColor, truncates: false)
         l2.alignment = .center
         l3.alignment = .center
@@ -688,7 +786,7 @@ private final class SettingFieldRow: NSView, NSTextFieldDelegate {
         let titleLabel = UI.label(title, size: 12)
         valueLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        editButton.title = "修改"
+        editButton.title = L.Footer.edit
         editButton.bezelStyle = .rounded
         editButton.controlSize = .small
         editButton.target = self

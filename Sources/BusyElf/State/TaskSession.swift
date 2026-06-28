@@ -95,11 +95,11 @@ enum Format {
         return String(format: "%lds", sec)
     }
 
-    /// "12s 前" / "3m 前" 这类相对短语。
+    /// "12s 前" / "3m ago" 这类相对短语(数字+单位通用,前/ago 后缀按语言)。
     static func ago(_ t: TimeInterval) -> String {
         let s = Int(t.rounded(.down))
-        if s < 60 { return "\(s)s 前" }
-        if s < 3600 { return "\(s / 60)m 前" }
-        return "\(s / 3600)h 前"
+        if s < 60 { return L.Time.ago(seconds: s, unit: "s") }
+        if s < 3600 { return L.Time.ago(seconds: s / 60, unit: "m") }
+        return L.Time.ago(seconds: s / 3600, unit: "h")
     }
 }
