@@ -31,11 +31,21 @@ for arg in "$@"; do
   esac
 done
 
-# 关掉本仓库 build 目录启动的旧实例(用绝对路径精确匹配,绝不误杀用户正常安装的 BusyElf)。
+# 关掉本仓库 build 目录启动的旧实例。匹配**可执行文件路径** $BIN(=$APP/Contents/MacOS/BusyElf):
+# 它的相对形式既是 `--debug` 直跑("$BIN" &)进程的命令行,又是 `open` 经 LaunchServices 启动的
+# 绝对命令行的子串 → **同时覆盖两种启动方式**。老版本只匹配绝对 $APP,漏杀 `--debug` 实例(其命令行是
+# 相对路径)→ 旧实例占着端口、新实例被挤到回退端口。仍足够具体,绝不误杀用户正常安装的 BusyElf
+# (其路径如 /Applications/BusyElf.app,不含 build/Build/…)。
 stop_existing() {
-  if pkill -9 -f "$(pwd)/$APP" 2>/dev/null; then
-    echo "${DIM}已关闭旧实例${RST}"; sleep 0.5
-  fi
+  pgrep -f "$BIN" >/dev/null 2>&1 || return 0      # 没有旧实例,直接返回
+  pkill -9 -f "$BIN" 2>/dev/null
+  echo "${DIM}已关闭旧实例${RST}"
+  # 等旧进程真正退出 + 端口释放(SIGKILL 后端口可能短暂滞留),避免新实例被挤到回退端口。
+  for _ in $(seq 1 15); do
+    pgrep -f "$BIN" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  sleep 0.3
 }
 
 if [ "$STOP_ONLY" = 1 ]; then
