@@ -29,9 +29,11 @@ final class TaskStoreTests: XCTestCase {
     }
     private func update(_ id: String, parentId: String? = nil, name: String? = nil,
                         tool: String? = nil, detail: String? = nil,
-                        reply: String? = nil, replyAppend: Bool = false) {
+                        reply: String? = nil, replyAppend: Bool = false,
+                        toolComplete: Bool = false) {
         store.update(id: id, parentId: parentId, name: name, tool: tool, detail: detail,
-                     reply: reply, replyAppend: replyAppend, agent: nil, cwd: nil)
+                     reply: reply, replyAppend: replyAppend, toolComplete: toolComplete,
+                     agent: nil, cwd: nil)
     }
 
     // MARK: - 创建 / 阻止休眠
@@ -128,6 +130,20 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertEqual(s("i")?.activity, "Bash: cmd")
         update("i", reply: "正在说话")
         XCTAssertEqual(s("i")?.activity, "正在说话")
+    }
+
+    /// toolComplete(工具完成 ✓):置位/新 turn 清零/纯元数据更新不误清;且永不改 status。
+    func testToolCompleteLifecycle() {
+        update("ac", tool: "Bash", detail: "x", toolComplete: false)   // 工具开始(Pre)
+        XCTAssertEqual(s("ac")?.toolComplete, false)
+        update("ac", tool: "Bash", detail: "x", toolComplete: true)    // 工具完成(Post)→ ✓
+        XCTAssertEqual(s("ac")?.toolComplete, true)
+        XCTAssertEqual(s("ac")?.status, .working)                        // ✓ 不改 status,仍 working
+        XCTAssertTrue(blocking)                                          // 仍阻止休眠
+        update("ac")                                                     // 纯元数据(无 tool/reply)→ 不写 activity → 不清 ✓
+        XCTAssertEqual(s("ac")?.toolComplete, true)
+        start("ac", prompt: "new turn")                                  // 新 turn → 清零
+        XCTAssertEqual(s("ac")?.toolComplete, false)
     }
 
     // MARK: - 子任务 / 移除

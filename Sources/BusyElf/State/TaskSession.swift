@@ -16,6 +16,7 @@ struct TaskSession: Identifiable {
     var cwd: String?            // 工作目录;basename 作项目名(若适配器提供)
     var name: String            // 任务名 / 子任务标签(如 "Explore");best-effort
     var activity: String        // 当前动作主行:工具+细节 或 最近回复(best-effort)
+    var toolComplete: Bool = false // 当前动作(工具调用)是否已完成 → UI 在 activity 前打 ✓。纯展示:任务仍 working、仍阻止休眠
     var waitingMessage: String? // wait 时需要用户做什么
     var status: TaskStatus
     let startedAt: Date

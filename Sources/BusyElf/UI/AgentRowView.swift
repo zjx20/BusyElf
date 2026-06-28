@@ -140,8 +140,11 @@ final class AgentRowView: HoverRow {
             let r = firstNonEmpty(session.reply) ?? "已完成"
             setSecond(r, color: .secondaryLabelColor, tip: session.reply)
         case .working:
-            let act = session.activity.isEmpty ? "在思考…" : session.activity
-            setSecond(act, color: session.activity.isEmpty ? .secondaryLabelColor : .labelColor, tip: session.activity)
+            let hasAct = !session.activity.isEmpty
+            let act = hasAct ? session.activity : "在思考…"
+            // 这一步(工具调用)已完成则前缀 ✓;仅标"这一步完成",任务仍 working、仍阻止休眠。
+            let shown = (hasAct && session.toolComplete) ? "✓ " + act : act
+            setSecond(shown, color: hasAct ? .labelColor : .secondaryLabelColor, tip: session.activity)
         }
 
         applyTimeVarying()   // 状态点(working 已断转灰)/ ⚠ 图标 / 第三行,随时间变化

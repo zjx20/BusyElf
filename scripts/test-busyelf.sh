@@ -100,6 +100,26 @@ hook '{"hook_event_name":"PostToolUse","session_id":"A","tool_name":"Edit","tool
 expect "waiting → working" "$(st A)" "working"
 expect "重新阻止休眠" ".blocking" "true"
 
+group "PreToolUse/PostToolUse:动作进行中 → 完成(toolComplete 打 ✓)"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"T","cwd":"/p","prompt":"跑测试"}'
+hook '{"hook_event_name":"PreToolUse","session_id":"T","tool_name":"Bash","tool_input":{"command":"npm test"}}'
+expect "PreToolUse → 即时显示工具" "$(fld T activity)" "Bash: npm test"
+expect "进行中 → 未打钩" "$(fld T toolComplete)" "false"
+expect "工具进行中仍 working" "$(st T)" "working"
+hook '{"hook_event_name":"PostToolUse","session_id":"T","tool_name":"Bash","tool_input":{"command":"npm test"}}'
+expect "PostToolUse → 标记完成(✓)" "$(fld T toolComplete)" "true"
+expect "✓ 不改 status(仍 working)" "$(st T)" "working"
+expect "仍阻止休眠" ".blocking" "true"
+hook '{"hook_event_name":"Notification","session_id":"T","notification_type":"permission_prompt","message":"授权?"}'
+expect "权限 → waiting,放行休眠" "$(st T)" "waiting"
+expect "waiting 放行休眠" ".blocking" "false"
+hook '{"hook_event_name":"PostToolUse","session_id":"T","tool_name":"Edit","tool_input":{"file_path":"a.go"}}'
+expect "授权后 PostToolUse → 复活 working" "$(st T)" "working"
+expect "复活后重新阻止休眠" ".blocking" "true"
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"T","prompt":"下一轮"}'
+expect "新 turn → 清钩" "$(fld T toolComplete)" "false"
+
 group "需求2:Stop → done(不删,绿点)+ seen 生命周期"
 reset
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"D","cwd":"/proj","prompt":"重构 auth"}'
@@ -156,6 +176,9 @@ reset
 task start  '{"id":"n1","prompt":"修 bug","agent":"my-agent","cwd":"/x"}'
 task update '{"id":"n1","tool":"Edit","toolInput":"auth.go"}'
 expect "中立 start+update → working" "$(st n1)" "working"
+expect "中立 update 缺省 → 未打钩" "$(fld n1 toolComplete)" "false"
+task update '{"id":"n1","tool":"Edit","toolInput":"auth.go","toolComplete":true}'
+expect "中立 toolComplete 透传 → ✓" "$(fld n1 toolComplete)" "true"
 task start  '{"id":"n1#s","parentId":"n1","name":"Explore"}'
 expect "中立子任务折叠 id + parentId" "$(fld 'n1#s' parentId)" "n1"
 task "done" '{"id":"n1#s","reply":"扫描完成"}'

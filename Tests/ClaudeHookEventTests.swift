@@ -23,10 +23,18 @@ final class ClaudeHookEventTests: XCTestCase {
         XCTAssertEqual(e?.action, .start(prompt: nil))
     }
 
+    func testPreToolUse() {
+        // 工具即将执行 → update,toolComplete=false(进行中)。
+        let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}"#)
+        XCTAssertEqual(e?.id, "s")
+        XCTAssertEqual(e?.action, .update(tool: "Bash", detail: "ls", reply: nil, replyAppend: false, toolComplete: false))
+    }
+
     func testPostToolUse() {
+        // 工具执行完 → update,toolComplete=true(打 ✓)。
         let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"ls"}}"#)
         XCTAssertEqual(e?.id, "s")
-        XCTAssertEqual(e?.action, .update(tool: "Bash", detail: "ls", reply: nil, replyAppend: false))
+        XCTAssertEqual(e?.action, .update(tool: "Bash", detail: "ls", reply: nil, replyAppend: false, toolComplete: true))
     }
 
     /// 在 subagent 内触发的 PostToolUse(带 agent_id)→ 折进子任务 id。
@@ -34,14 +42,14 @@ final class ClaudeHookEventTests: XCTestCase {
         let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","agent_id":"a1","agent_type":"Explore","tool_name":"Grep","tool_input":{"pattern":"foo"}}"#)
         XCTAssertEqual(e?.id, "s#a1")
         XCTAssertEqual(e?.parentId, "s")
-        XCTAssertEqual(e?.action, .update(tool: "Grep", detail: "foo", reply: nil, replyAppend: false))
+        XCTAssertEqual(e?.action, .update(tool: "Grep", detail: "foo", reply: nil, replyAppend: false, toolComplete: true))
     }
 
     func testMessageDisplayReplaceThenAppend() {
         let first = parse(#"{"hook_event_name":"MessageDisplay","session_id":"s","index":0,"delta":"X"}"#)
-        XCTAssertEqual(first?.action, .update(tool: nil, detail: nil, reply: "X", replyAppend: false))
+        XCTAssertEqual(first?.action, .update(tool: nil, detail: nil, reply: "X", replyAppend: false, toolComplete: false))
         let next = parse(#"{"hook_event_name":"MessageDisplay","session_id":"s","index":1,"delta":"Y"}"#)
-        XCTAssertEqual(next?.action, .update(tool: nil, detail: nil, reply: "Y", replyAppend: true))
+        XCTAssertEqual(next?.action, .update(tool: nil, detail: nil, reply: "Y", replyAppend: true, toolComplete: false))
     }
 
     func testNotificationPermissionPromptWaits() {
@@ -83,7 +91,7 @@ final class ClaudeHookEventTests: XCTestCase {
     }
 
     func testUnknownEventIgnored() {
-        let e = parse(#"{"hook_event_name":"PreToolUse","session_id":"s"}"#)
+        let e = parse(#"{"hook_event_name":"SessionStart","session_id":"s"}"#)
         XCTAssertEqual(e?.action, .ignore)
     }
 
@@ -95,6 +103,6 @@ final class ClaudeHookEventTests: XCTestCase {
     func testToolDetailPicksFirstNonEmpty() {
         // file_path 优先于其它(command 不在时)
         let e = parse(#"{"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Edit","tool_input":{"file_path":"a.swift"}}"#)
-        XCTAssertEqual(e?.action, .update(tool: "Edit", detail: "a.swift", reply: nil, replyAppend: false))
+        XCTAssertEqual(e?.action, .update(tool: "Edit", detail: "a.swift", reply: nil, replyAppend: false, toolComplete: true))
     }
 }

@@ -13,7 +13,8 @@
 |---|---|---|
 | `UserPromptSubmit` | `start` | 用户提交 prompt → 一个 turn 开始 = 在干活 |
 | `SubagentStart` | `start`(子任务) | subagent 生成 → 独立子任务(`agent_id` 折进 id,`parentId`=session,`name`=agent_type) |
-| `PostToolUse` | `update` | 工具执行完 → 在干活;也是"等待/完成后恢复"的信号 |
+| `PreToolUse` | `update`(`toolComplete:false`) | 工具即将执行 → 即时显示"正在做的工具"(不等做完) |
+| `PostToolUse` | `update`(`toolComplete:true`) | 工具执行完 → 动作行打 ✓;也是"等待/完成后恢复"的信号 |
 | `MessageDisplay` | `update`(reply) | 助手文本流式输出 → 实时回复(`delta`,replace/append) |
 | `Notification` | `wait` / 忽略 | 按 `notification_type`:`permission_prompt` → wait;`idle_prompt` 等 → 忽略 |
 | `Stop` | `done` | turn 正常结束 = 完成(留存提示,非移除) |
@@ -42,6 +43,7 @@
 {
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "MessageDisplay":   [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "Notification":     [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
@@ -65,10 +67,10 @@
 ### 分层(可选精简)
 
 - **防休眠 + 完成/失败提示(核心)**:`UserPromptSubmit` / `Stop` / `StopFailure` / `SessionEnd`。
-- **"当前工作 / 当前回复"展示**:加 `PostToolUse`(当前工具)和 `MessageDisplay`(实时回复)。
+- **"当前工作 / 当前回复"展示**:加 `PreToolUse`(工具开始即显示)、`PostToolUse`(工具做完打 ✓ + 权限授权后复活)和 `MessageDisplay`(实时回复)。
 - **permission 期间放行休眠 + 提醒**:加 `Notification`。
 - **subagent 独立子任务行**:加 `SubagentStart` / `SubagentStop`。
-- 注意 `PostToolUse` 与 `MessageDisplay` 是仅有的"话痨" hook(每次工具调用 / 每行助手文本各发一次)。嫌吵可去掉,代价:popover 不逐工具/逐行刷新。
+- 注意 `PreToolUse` / `PostToolUse` / `MessageDisplay` 是仅有的"话痨" hook(每次工具调用前后 / 每行助手文本各发一次)。嫌吵可去掉,代价:popover 不逐工具/逐行刷新;只想保留"授权后复活"则至少留 `PostToolUse`。
 
 ### ⚠️ 端口要和 BusyElf 实际监听的一致
 

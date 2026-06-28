@@ -51,10 +51,14 @@
   "toolInput":   "string?  // 工具细节,如命令或文件路径(同义 detail,优先 toolInput)",
   "reply":       "string?  // agent 回复文本(或增量)",
   "replyAppend": "bool?    // true=追加到现有回复,false/缺省=替换",
+  "toolComplete": "bool? // true=当前动作(工具调用)已完成 → UI 在动作行打 ✓;缺省=进行中",
   "parentId":    "string?  // 子任务关联(漏了 start 时也能把子任务建对)"
 }
 ```
 效果:upsert 该任务,`status = working`。若原为 `waiting`/`done`/`failed`,则**复活接管**(恢复阻止休眠、清除等待/失败痕迹)。刷新展示用的"当前动作"与回复。
+
+> `toolComplete` 仅影响动作行的 ✓ 展示,**不改变 status**:任务仍 `working`、仍阻止休眠;整任务的完成是 `done`。
+> 配对用法(对应 Claude 的 `PreToolUse`/`PostToolUse`):工具开始发 `toolComplete:false`、工具结束发 `toolComplete:true`。只发其一也可——只发结束即"做完才显示并打 ✓"。
 
 > upsert 语义是刻意的:即使漏收了 `start`(BusyElf 中途启动),一条 `update` 也能建/恢复任务、重新阻止休眠——**宁可多醒,不可漏醒**。
 > 流式回复:`reply` + `replyAppend` 是通用 replace/append 原语——中立客户端直接发完整 `reply`(replace 即可)即可,无需增量概念。

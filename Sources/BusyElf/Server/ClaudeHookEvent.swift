@@ -13,7 +13,8 @@ import Foundation
 /// 映射:
 ///   - `UserPromptSubmit` → start   (一个 turn 开始 = 在干活)
 ///   - `SubagentStart`    → start    (子任务开始;agent_id 折进 id,parentId=session_id,name=agent_type)
-///   - `PostToolUse`      → update  (在干活;也是 waiting/终态→working 的恢复信号)
+///   - `PreToolUse`       → update  (工具即将执行 → 即时显示"正在做的工具",toolComplete=false)
+///   - `PostToolUse`      → update  (工具已完成 → toolComplete=true 打 ✓;也是 waiting/终态→working 的恢复信号)
 ///   - `MessageDisplay`   → update  (助手实时回复 delta → reply,replace/append)
 ///   - `Notification`     → wait / ignore  (按 notification_type:permission 才 wait,idle 忽略)
 ///   - `Stop`/`SessionEnd`/`SubagentStop` → done  (turn / 会话 / 子任务正常结束)
@@ -30,7 +31,7 @@ struct ClaudeHookEvent {
     /// 从 hook 事件派生出的中立动作。
     enum Action: Equatable {
         case start(prompt: String?)
-        case update(tool: String?, detail: String?, reply: String?, replyAppend: Bool)
+        case update(tool: String?, detail: String?, reply: String?, replyAppend: Bool, toolComplete: Bool)
         case wait(message: String?)
         case done(reply: String?)
         case fail(errorKind: String?, errorDetail: String?, reply: String?)
@@ -82,17 +83,25 @@ struct ClaudeHookEvent {
             // 子任务开始;标签/parentId 已在上面算好,这里无额外字段。
             action = .start(prompt: nil)
 
-        case "PostToolUse":
-            // 工具名铁实;细节按工具形状尽力取(Bash 看 command,Edit/Write/Read 看 file_path,等)。
+        case "PreToolUse":
+            // 工具即将执行:同 PostToolUse 取工具名 + 细节,但标 toolComplete=false(进行中)。
+            // 让 popover 即时显示"正在做的工具",而非 PostToolUse 那个"刚做完"的滞后画面。
             let tool = Self.string(dict, "tool_name")
             let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
-            action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false)
+            action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false, toolComplete: false)
+
+        case "PostToolUse":
+            // 工具名铁实;细节按工具形状尽力取(Bash 看 command,Edit/Write/Read 看 file_path,等)。
+            // 工具已执行完 → toolComplete=true(UI 打 ✓);也是 waiting/终态→working 的复活信号。
+            let tool = Self.string(dict, "tool_name")
+            let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
+            action = .update(tool: tool, detail: detail, reply: nil, replyAppend: false, toolComplete: true)
 
         case "MessageDisplay":
             // 助手文本流式输出:delta 是增量。新消息首批(index==0)替换,后续追加。
             let delta = Self.string(dict, "delta")
             let index = Self.int(dict, "index") ?? 0
-            action = .update(tool: nil, detail: nil, reply: delta, replyAppend: index != 0)
+            action = .update(tool: nil, detail: nil, reply: delta, replyAppend: index != 0, toolComplete: false)
 
         case "Notification":
             // 读 notification_type 区分:permission(真等待)才 wait;idle 等不产生等待项。

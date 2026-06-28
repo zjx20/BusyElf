@@ -23,6 +23,7 @@
 {
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
+    "PreToolUse":       [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "PostToolUse":      [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "MessageDisplay":   [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "Notification":     [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
@@ -53,12 +54,13 @@
 |---|---|
 | `UserPromptSubmit` / `Stop` / `SessionEnd` | **防休眠核心**:单个长 turn 全程保持 working;`Stop` 让任务变"已完成"(绿点提示,看一次后清理)而非直接消失 |
 | `StopFailure` | turn 因 API 错误异常停止 → **红点紧急提示**,展示失败原因(rate_limit 等)与细节 |
-| `PostToolUse` | popover 逐工具刷新"当前在干什么" |
+| `PreToolUse` | popover **即时**显示"正在做的工具"(工具开始时,不等它做完) |
+| `PostToolUse` | 把该工具标为已完成(行内 ✓);并在权限等待结束后把任务从"等待"复活为"工作中" |
 | `MessageDisplay` | popover 实时显示 agent 当前回复(话痨:每行助手文本发一发;精简显示,可去掉) |
 | `Notification` | 权限等待期间放行休眠并系统提醒 |
 | `SubagentStart` / `SubagentStop` | 把 subagent(如 Explore)显示为独立子任务行,挂在父任务下 |
 
-**想更精简**:只留 `UserPromptSubmit` / `Stop` / `SessionEnd` / `StopFailure` 也能用(防休眠 + 完成/失败提示),其余按需加。`PostToolUse` 与 `MessageDisplay` 是仅有的"话痨"事件,嫌频繁可去掉。
+**想更精简**:只留 `UserPromptSubmit` / `Stop` / `SessionEnd` / `StopFailure` 也能用(防休眠 + 完成/失败提示),其余按需加。`PreToolUse` / `PostToolUse` / `MessageDisplay` 是仅有的"话痨"事件,嫌频繁可去掉;但若想要"权限授权后任务自动从等待复活为工作中",至少保留 `PostToolUse`。
 
 ## 第 3 步:验证
 

@@ -53,6 +53,7 @@ final class TaskStore {
             self.clearTerminalMarks(&s)
             s.reply = nil          // 新 turn:旧回复作废
             s.activity = ""        // 新 turn:旧动作作废
+            s.toolComplete = false  // 新 turn:旧动作的 ✓ 作废
             if let prompt, !prompt.isEmpty { s.prompt = prompt }
             self.applyMeta(&s, parentId: parentId, name: name, agent: agent, cwd: cwd)
             s.lastSeen = now
@@ -67,6 +68,7 @@ final class TaskStore {
     func update(id: String, parentId: String?, name: String?,
                 tool: String?, detail: String?,
                 reply: String?, replyAppend: Bool,
+                toolComplete: Bool = false,
                 agent: String?, cwd: String?) {
         queue.async {
             let now = Date()
@@ -77,8 +79,10 @@ final class TaskStore {
                 s.reply = replyAppend ? ((s.reply ?? "") + reply) : reply
             }
             // 当前动作主行:有工具用"工具: 细节",否则退化到最新回复。
+            // toolComplete 只在真正写入新动作那一刻同步(纯元数据更新不误清 ✓)。
             if let act = Self.activity(tool: tool, detail: detail, reply: s.reply) {
                 s.activity = act
+                s.toolComplete = toolComplete
             }
             self.applyMeta(&s, parentId: parentId, name: name, agent: agent, cwd: cwd)
             s.lastSeen = now
@@ -271,6 +275,7 @@ final class TaskStore {
         if !s.name.isEmpty { d["name"] = s.name }
         if let v = s.prompt { d["prompt"] = v }
         if !s.activity.isEmpty { d["activity"] = s.activity }
+        d["toolComplete"] = s.toolComplete
         if let v = s.reply { d["reply"] = v }
         if let v = s.waitingMessage { d["waitingMessage"] = v }
         if let v = s.errorKind { d["errorKind"] = v }
