@@ -19,14 +19,14 @@
    各 Agent(Claude Code / Codex / …)
         │  原生事件(hook/lifecycle)
         ▼
-   适配器:两条入口都映射到同一套中立 4 动词
+   适配器:两条入口都映射到同一套中立 6 动词
      A) Claude HTTP hook ── 原始 payload ──▶ POST /claude/hooks (BusyElf 内建翻译, 免 jq)
-     B) 通用 jq+curl 翻译 ── 中立 body ────▶ POST /v1/task/{start|update|wait|end}
+     B) 通用 jq+curl 翻译 ── 中立 body ────▶ POST /v1/task/{start|update|wait|done|fail|remove}
         ▼
    ┌──────────────── BusyElf.app (单进程, 纯 AppKit, LSUIElement) ─────────────┐
    │  LoopbackServer (NWListener, 127.0.0.1, 事件驱动)                          │
    │        │ Router 按路径分流:/claude/hooks → ClaudeHookEvent 翻译;          │
-   │        │ /v1/task/* → 中立 body。两者都落到同一套 4 动词 + 容错解析        │
+   │        │ /v1/task/* → 中立 body。两者都落到同一套 6 动词 + 容错解析        │
    │        ▼                                                                  │
    │  TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/remove                │
    │        │ reconcile()                                                      │
@@ -83,37 +83,43 @@ final class SleepGuard {
 
 ## 4. 中立协议(摘要)
 
-BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PROTOCOL.md)。四个动词:
+BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PROTOCOL.md)。六个动词:
 
 | Endpoint | 含义 | 主要字段 | 状态效果 |
 |---|---|---|---|
-| `POST /v1/task/start`  | 开始任务 | `id`*、`name?`、`agent?` | → **working** |
-| `POST /v1/task/update` | 任务更新 | `id`*、`tool?`、`detail?`、`reply?` | → **working**(waiting 时重新接管) |
+| `POST /v1/task/start`  | 开始任务 | `id`*、`prompt?`、`name?`、`parentId?`、`agent?` | → **working** |
+| `POST /v1/task/update` | 任务更新 | `id`*、`tool?`、`toolInput?`、`reply?`、`replyAppend?`、`parentId?` | → **working**(终态/waiting 时复活接管) |
 | `POST /v1/task/wait`   | 等待用户输入 | `id`*、`message?` | → **waiting** |
-| `POST /v1/task/end`    | 结束任务 | `id`* | 移除任务 |
+| `POST /v1/task/done`   | 任务完成 | `id`*、`reply?` | → **done**(留存提示,不阻止休眠) |
+| `POST /v1/task/fail`   | 任务失败 | `id`*、`errorKind?`、`errorDetail?` | → **failed**(红点提示) |
+| `POST /v1/task/remove` | 移除任务 | `id`* | 移除任务(级联子任务) |
 
-所有 agent 专属知识(字段名、事件语义)都下沉到适配器层;BusyElf 服务端永不 import 一个具体 agent 的概念。
+子任务把子 id 折进 `id`(`父#子`)+ `parentId` 表达。所有 agent 专属知识(字段名、事件语义)都下沉到适配器层;BusyElf 服务端永不 import 一个具体 agent 的概念。中立接口与 `/claude/hooks` 表现力对等。
 
-**内建 Claude 便捷端点**:除中立的 `/v1/task/*`,服务端还内建 `POST /claude/hooks`,直吃 Claude Code 的 HTTP hook 原始 payload(`type:"http"`,免 `jq`+`curl`),按 `hook_event_name` 翻成同一套 4 动词。Claude 专属知识仍只隔离在 `Server/ClaudeHookEvent.swift` 一个文件里——`TaskStore`/状态机不变,核心仍中立。它让 Claude Code 成为"一等公民",但不耦合:其它 agent 仍走 `/v1/task/*`。该端点始终回 `2xx + 空 body`(Claude 视为无操作),保证 BusyElf 是纯被动观察者。详见 [PROTOCOL.md](PROTOCOL.md) 与 [adapters/claude-code.md](adapters/claude-code.md)。
+**内建 Claude 便捷端点**:除中立的 `/v1/task/*`,服务端还内建 `POST /claude/hooks`,直吃 Claude Code 的 HTTP hook 原始 payload(`type:"http"`,免 `jq`+`curl`),按 `hook_event_name` 翻成同一套六动词。Claude 专属知识仍只隔离在 `Server/ClaudeHookEvent.swift` 一个文件里——`TaskStore`/状态机不变,核心仍中立。它让 Claude Code 成为"一等公民",但不耦合:其它 agent 仍走 `/v1/task/*`。该端点始终回 `2xx + 空 body`(Claude 视为无操作),保证 BusyElf 是纯被动观察者。详见 [PROTOCOL.md](PROTOCOL.md) 与 [adapters/claude-code.md](adapters/claude-code.md)。
 
 ## 5. 任务状态机
 
-每个任务的状态:`status ∈ { working, waiting }`,加若干展示字段。
+每个任务的状态:`status ∈ { working, waiting, done, failed }`(后两者为终态),加若干展示字段。
 
 派生量:
-- **阻止休眠** = 存在任一 `working` 任务。
-- **需要关注** = 存在任一 `waiting` 任务。
+- **阻止休眠** = 存在任一 `working` 任务(终态不阻止)。
+- **需要关注**(橙) = 存在任一 `waiting` 任务。
+- **完成提示**(绿点)/ **失败提示**(红点,优先) = 存在任一未看过的 `done` / `failed`。
 
-动词 → 状态转移(注意 upsert 规则的刻意不对称):
+动词 → 状态转移(活动态 working/waiting;终态 done/failed 留存展示,可被 update/start 复活):
 
 | 动词 | 规则 | 理由 |
 |---|---|---|
-| `start`  | **upsert** → working | 任务开始 |
-| `update` | **upsert** → working;若原为 waiting 则恢复 | 既是"在干活"心跳,也是 waiting→working 的恢复信号。**upsert**:即使漏掉了 start 也能恢复,**宁可多醒不可漏醒** |
-| `wait`   | **仅更新已存在的任务** → waiting(无此任务则忽略) | 避免"任务已结束后又来一条 wait"产生幽灵等待项 |
-| `end`    | 移除(幂等) | 任务结束 |
+| `start`  | **upsert** → working;复活终态;清旧回复(新 turn) | 任务开始 |
+| `update` | **upsert** → working;复活 waiting/终态 | 既是"在干活"心跳,也是恢复信号。**upsert**:漏掉 start 也能接上(中途启动),**宁可多醒不可漏醒** |
+| `wait`   | **upsert** → waiting | 需用户处理。中立总是创建("见到请求就追踪") |
+| `done`   | 已存在 → done(failed 不被覆盖) | 正常完成,留存提示而非消失 |
+| `fail`   | **upsert** → failed(失败优先) | 异常停止,红点紧急提示 |
+| `remove` | 移除(幂等,级联子任务) | 用户主动清理 |
 
-> 对 Claude Code 的体现:`update` 的"upsert/恢复"正是"Notification 后第一个 PostToolUse 当作用户已响应、重新接管休眠";`wait` 的"仅更新已存在"正好让 turn 结束后(`Stop` 已移除任务)才触发的 `idle_prompt` 通知被自然忽略——**因此不依赖有争议的 `notification_type` 字段**。
+> 终态(done/failed)留在字典里供展示,**不阻止休眠**,靠 seen 生命周期清理:popover 打开标 seen(清角标)、关闭后 purge(下次打开消失),并有 TTL/数量上限兜底。
+> 对 Claude Code 的体现:`Stop`→done(完成提示)、`StopFailure`→fail(失败提示)、`SubagentStart/Stop`→子任务。permission vs idle 通知靠**读 `notification_type`** 区分(见下)。
 
 幂等设计的原因:事件投递是 at-least-once 且可能丢失。用集合成员而非 `+1/-1` 整数计数器——整数会漂移成负数或卡在正数从而**永久阻止休眠**,这是本应用绝不能有的 bug。
 
@@ -200,7 +206,7 @@ struct TaskSession: Identifiable {
 | UI 框架 | 全程纯 AppKit(含 popover,不链接 SwiftUI) | 需要图标数字徽标/左右键区分/程序化 popover;链 SwiftUI 会把 footprint 抬到 ~129MB |
 | 阻止休眠 | `IOPMAssertionCreateWithName(PreventUserIdleSystemSleep)` | == `caffeinate -i`;无子进程、崩溃自动回收、sandbox 安全 |
 | 计数模型 | `id` 字典 + 幂等增删 | 事件会丢/重;整数计数器会永久卡住休眠 |
-| 协议 | agent 中立的 4 动词 HTTP | 不绑 Claude;未来接 Codex 等只需写适配器 |
+| 协议 | agent 中立的 6 动词 HTTP(start/update/wait/done/fail/remove) | 不绑 Claude;未来接 Codex 等只需写适配器;与 `/claude/hooks` 表现力对等 |
 | Hook 传输 | Claude 走内建 `/claude/hooks`(HTTP hook,零依赖);通用走 `jq+curl`→`/v1/task/*` | `jq` 非人人有,内建适配体验更好;翻译隔离在一个文件,核心仍中立、不 ship 二进制 |
 | 服务器 | `NWListener` loopback,事件驱动 | 0 空闲 CPU、零依赖、免本地网络隐私弹窗 |
 | 崩溃自愈 | 不做自动探测;靠手动移除 | 小概率;换取零后台定时器 |
@@ -220,9 +226,9 @@ struct TaskSession: Identifiable {
 
 ## 14. 待确认 / 注意事项
 
-- **Claude Code hook 字段名(已对照官方 hooks 参考锁定)**:prompt 文本字段就是 **`prompt`**;`PostToolUse` 看 `tool_name` + `tool_input.{command,file_path,…}`;`Notification` 看 `message`;`Stop`/`SessionEnd` 只凭事件名 `end`。即便某版本字段不同也只影响展示(降级即可),**打不进核心休眠逻辑**(逻辑只看 `hook_event_name` + `session_id`)。
-- **刻意不读 `notification_type`**:官方 hooks 参考确实列了该字段(含 `permission_prompt`/`idle_prompt`),但本设计**故意不依赖**它——靠状态机时序区分 permission vs idle(`wait` 在 `Stop` 已移除任务后自然被忽略),这样即便某版本字段缺失/语义变化也稳。
+- **Claude Code hook 字段名(已对照官方 hooks 参考锁定)**:prompt 文本字段就是 **`prompt`**;`PostToolUse` 看 `tool_name` + `tool_input.{command,file_path,…}`;`MessageDisplay` 看 `delta`/`index`;`Stop`/`SubagentStop`/`StopFailure` 看 `last_assistant_message`(及 `error`/`error_details`);subagent 看 `agent_id`/`agent_type`。即便某版本字段不同也只影响展示(降级即可),**打不进核心休眠逻辑**(逻辑只看 `hook_event_name` + `session_id`)。
+- **读 `notification_type` 区分 permission vs idle**:原设计靠状态机时序区分、刻意不读该字段;现因终态(done/failed)留存展示、`wait` 改为总是 upsert 创建,时序不再可靠,故**改为显式读 `notification_type`**(`permission_prompt`→wait,`idle_prompt` 等→忽略)。官方已稳定提供该字段。
 - **`jq` 现在可选**:推荐用内建 `/claude/hooks`(HTTP hook,零依赖);仍想用通用 jq+curl→`/v1/task/*` 的才需 `brew install jq`。
 - **HTTP hook URL 写死端口**:`/claude/hooks` 的 URL 含默认 `17872`;若该端口被占用、BusyElf 回退到 17873+,需把 URL 端口同步改掉(与 jq 方案的 curl URL 同样限制)。
-- **多 agent 接入**(Codex CLI 等):各写适配器映射到同一套 4 动词;BusyElf 无需改动。
+- **多 agent 接入**(Codex CLI 等):各写适配器映射到同一套 6 动词;BusyElf 无需改动。
 - **环境约束**:构建/签名/运行/真机验证均在 macOS 进行(已在 macOS 26 / Apple Silicon 真机编译、运行、验证通过)。

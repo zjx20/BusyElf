@@ -56,6 +56,8 @@ final class PopoverController: NSViewController {
         now = Date()
         displaySwitch.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
+        // 打开即把当前终态项标记为 seen(清菜单栏角标);本次仍显示它们。
+        TaskStore.shared.markTerminalSeen()
         rebuild()
         startTicker()
     }
@@ -64,6 +66,8 @@ final class PopoverController: NSViewController {
         super.viewDidDisappear()
         stopTicker()
         confirmingStopAll = false
+        // 关闭即清理掉已 seen 的终态项 → 下次打开就不再显示。
+        TaskStore.shared.purgeSeenTerminal()
     }
 
     // MARK: - 外部数据入口(AppDelegate 在 onChange 时调用)
@@ -95,14 +99,17 @@ final class PopoverController: NSViewController {
                 rowsById[s.id] = row
             }
         }
-        // 按 session 顺序重排 stack(行对象复用,确认态得以保留)
+        // 按展示顺序重排 stack(子任务紧跟父任务;行对象复用,确认态得以保留)
+        let display = displaySessions(sessions)
         for v in listStack.arrangedSubviews { listStack.removeArrangedSubview(v); v.removeFromSuperview() }
-        for (index, s) in sessions.enumerated() {
+        for (index, s) in display.enumerated() {
             guard let row = rowsById[s.id] else { continue }
             listStack.addArrangedSubview(row)
             row.leadingAnchor.constraint(equalTo: listStack.leadingAnchor).isActive = true
             row.trailingAnchor.constraint(equalTo: listStack.trailingAnchor).isActive = true
-            row.setShowsTopSeparator(index > 0)   // 行间细分隔线(首行不画)
+            // 子任务行与父行视觉粘连(不画分隔线);其余非首行画。
+            let childUnderParent = s.parentId != nil && ids.contains(s.parentId!)
+            row.setShowsTopSeparator(index > 0 && !childUnderParent)
         }
 
         let empty = sessions.isEmpty
@@ -112,6 +119,27 @@ final class PopoverController: NSViewController {
         updateHeader()
         updateFooter()
         syncContentSize()
+    }
+
+    /// 展示顺序:顶层任务按原排序输出,每个父任务后紧跟它的子任务(subagent)。
+    /// 孤儿子任务(父已不在快照里)当顶层处理,避免丢失。纯展示层排序,不改数据层中性。
+    private func displaySessions(_ sessions: [TaskSession]) -> [TaskSession] {
+        let ids = Set(sessions.map { $0.id })
+        var childrenByParent: [String: [TaskSession]] = [:]
+        var tops: [TaskSession] = []
+        for s in sessions {
+            if let pid = s.parentId, ids.contains(pid) {
+                childrenByParent[pid, default: []].append(s)
+            } else {
+                tops.append(s)
+            }
+        }
+        var ordered: [TaskSession] = []
+        for t in tops {
+            ordered.append(t)
+            if let kids = childrenByParent[t.id] { ordered.append(contentsOf: kids) }
+        }
+        return ordered
     }
 
     /// 让 popover 高度跟内容走。`NSPopover` 长高很积极,但内容变矮(任务清空)时**不会自动缩回**——
@@ -128,15 +156,22 @@ final class PopoverController: NSViewController {
     private func updateHeader() {
         let working = sessions.lazy.filter { $0.status == .working }.count
         let waiting = sessions.lazy.filter { $0.status == .waiting }.count
+        let failed = sessions.lazy.filter { $0.status == .failed }.count
         if sessions.isEmpty {
             subtitleLabel.stringValue = "Idle · 允许休眠"
             boltIcon.contentTintColor = .secondaryLabelColor
+        } else if failed > 0 {
+            subtitleLabel.stringValue = "\(failed) 个失败 · 共 \(sessions.count) 个"
+            boltIcon.contentTintColor = .systemRed
         } else if working > 0 {
             subtitleLabel.stringValue = "Blocking sleep · \(sessions.count) 个任务"
             boltIcon.contentTintColor = waiting > 0 ? .systemOrange : .labelColor
-        } else {
+        } else if waiting > 0 {
             subtitleLabel.stringValue = "等你处理 · \(sessions.count) 个任务"
             boltIcon.contentTintColor = .systemOrange
+        } else {
+            subtitleLabel.stringValue = "已完成 · \(sessions.count) 个任务"
+            boltIcon.contentTintColor = .systemGreen
         }
     }
 
@@ -171,7 +206,7 @@ final class PopoverController: NSViewController {
 
     // MARK: - 动作
 
-    private func onForceStop(_ id: String) { TaskStore.shared.end(id: id) }
+    private func onForceStop(_ id: String) { TaskStore.shared.remove(id: id) }
 
     @objc private func toggleDisplayAwake() {
         SleepGuard.shared.setKeepDisplayAwake(displaySwitch.state == .on)

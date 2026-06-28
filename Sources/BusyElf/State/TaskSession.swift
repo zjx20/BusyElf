@@ -3,19 +3,42 @@ import Foundation
 enum TaskStatus {
     case working   // 在干活 → 阻止休眠
     case waiting   // 等用户 → 放行休眠,但需关注
+    case done      // 正常完成 → 放行休眠;绿点提示,看一次后清理
+    case failed    // 异常停止(API 错误)→ 放行休眠;红点紧急提示
 }
 
 /// 单个 agent 任务的展示 + 状态。值类型,真相源是 `TaskStore` 里的字典。
+///
+/// 字段大多 best-effort:有就展示,没有就降级,绝不影响休眠逻辑(只看 status==.working)。
 struct TaskSession: Identifiable {
-    let id: String              // 来自 agent 的 task/session id;字典 key
+    let id: String              // 来自 agent 的 task/session id(子任务 = "sessionId#agentId");字典 key
     var agent: String?          // 来源标签 "claude-code"/"codex";展示/分组
     var cwd: String?            // 工作目录;basename 作项目名(若适配器提供)
-    var name: String            // 任务名/prompt(best-effort)
-    var activity: String        // 当前工具+细节摘要(best-effort)
+    var name: String            // 任务名 / 子任务标签(如 "Explore");best-effort
+    var activity: String        // 当前动作主行:工具+细节 或 最近回复(best-effort)
     var waitingMessage: String? // wait 时需要用户做什么
     var status: TaskStatus
     let startedAt: Date
     var lastSeen: Date
+
+    // ── 富信息(展示用,全可选)──
+    var prompt: String?         // 触发本轮的用户提示词
+    var reply: String?          // agent 当前/最终回复文本(流式累积或 last_assistant_message)
+    var errorKind: String?      // 失败类型(如 "rate_limit");中立字符串
+    var errorDetail: String?    // 失败细节 / API 错误原文
+    var totalTokens: Int?       // 预留:token 消耗(本期不展示)
+
+    // ── 子任务关联 ──
+    var parentId: String?       // 父任务 id;非 nil 即子任务(agent id 已折进自身 id)
+
+    // ── 终态提示生命周期 ──
+    var seen: Bool = false      // 该终态是否已被用户在 popover 中看到
+    var endedAt: Date?          // 进入终态的时刻(终态时长冻结 / TTL 清理用)
+
+    /// 终态:已完成或已失败。留在字典里展示,不阻止休眠,靠 seen 生命周期清理。
+    var isTerminal: Bool { status == .done || status == .failed }
+    /// 子任务(subagent):有父任务关联。
+    var isSubtask: Bool { parentId != nil }
 
     /// 展示用项目名:优先 cwd 的 basename,退化到 name,再退化到 id。
     var projectName: String {
@@ -27,9 +50,10 @@ struct TaskSession: Identifiable {
         return id
     }
 
-    /// 已运行时长(相对传入的"现在")。由 popover 打开时的 1s ticker 提供 now。
+    /// 已运行时长。终态冻结在 `endedAt`(不再走秒);活动态相对传入的"现在"。
     func elapsed(asOf now: Date) -> TimeInterval {
-        max(0, now.timeIntervalSince(startedAt))
+        let ref = isTerminal ? (endedAt ?? lastSeen) : now
+        return max(0, ref.timeIntervalSince(startedAt))
     }
 
     /// 距上次"有进展"的时长,用于"似乎仍活跃"警示与卡死提示。

@@ -35,3 +35,17 @@ targets:
       path: BusyElf.entitlements
       properties:
         com.apple.security.app-sandbox: false   # 非沙盒, Developer ID 外分发
+  BusyElfTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [Tests]
+    dependencies:
+      - target: BusyElf                          # 宿主 app;@testable import 内部类型
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: elf.busyelf.tests
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"                  # 本地跑测试不签名
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO

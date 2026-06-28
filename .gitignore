@@ -11,6 +11,10 @@ DerivedData/
 *.xcarchive
 *.zip
 
+# 代码覆盖率原始 profile(xcodebuild test 插桩生成)
+*.profraw
+*.profdata
+
 # macOS
 .DS_Store
 

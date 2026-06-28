@@ -14,6 +14,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 生命周期
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 单元测试宿主:跳过 app 装配(不起服务端 / 不建状态栏),让测试纯跑内部逻辑。
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
+
         setUpStatusItem()
         setUpPopover()
         wireStore()
@@ -57,12 +60,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func wireStore() {
-        // onChange / onAttention 均由 TaskStore 在主线程回调。
+        // onChange / onAttention / onTerminalAlert 均由 TaskStore 在主线程回调。
         TaskStore.shared.onChange = { [weak self] sessions in
             self?.handleStoreChange(sessions)
         }
         TaskStore.shared.onAttention = { session in
             Notifier.shared.notifyWaiting(session)
+        }
+        TaskStore.shared.onTerminalAlert = { session in
+            Notifier.shared.notifyFailed(session)
         }
     }
 
@@ -83,7 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         latestSessions = sessions
         let working = sessions.filter { $0.status == .working }.count
         let waiting = sessions.filter { $0.status == .waiting }.count
-        statusController.refresh(workingCount: working, waitingCount: waiting)
+        let badge = StatusBadge(
+            hasUnseenFailed: sessions.contains { $0.status == .failed && !$0.seen },
+            hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen })
+        statusController.refresh(workingCount: working, waitingCount: waiting, badge: badge)
         popoverController?.update(sessions: sessions)   // 仅在已创建时刷新
     }
 

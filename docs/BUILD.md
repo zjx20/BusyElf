@@ -72,6 +72,22 @@ open ~/Library/Developer/Xcode/DerivedData/.../BusyElf.app   # 或用 -derivedDa
 pmset -g assertions                                 # 验证休眠断言(P0 核心)
 ```
 
+## 测试
+
+两层,均可 CLI 一行跑:
+
+```bash
+scripts/test-unit.sh      # 白盒单元测试(XCTest):TaskStore 状态机 / ClaudeHookEvent 映射 / TaskEvent 解析
+scripts/test-busyelf.sh   # 端到端(E2E):自启实例 → 打真实 HTTP 端点 → 断言内部状态。覆盖 7 大需求
+```
+
+- **单元测试**(`Tests/`,target `BusyElfTests`):宿主测试;`AppDelegate` 在 XCTest 下跳过 app 装配,只跑纯逻辑。`TaskStore` 的同步测试辅助(`snapshotSync`/`resetSync`)用 `#if DEBUG` 包裹,**不进 Release**。
+- **E2E**(`scripts/test-busyelf.sh`):依赖 `jq`。靠一个**调试观测接口**做断言,无需 sleep:
+  - 仅当以 `BUSYELF_DEBUG=1` 启动时开启 `/debug/*`(生产默认关闭,不暴露内部状态):
+    - `GET /debug/state` → 全部任务的内部状态 JSON + 派生量(`blocking`/`hasUnseenDone`/`hasUnseenFailed`)。读用 `queue.sync`,兼作**写后读屏障**,故断言不用等。
+    - `POST /debug/reset`(清空)、`/debug/seen`(模拟打开 popover)、`/debug/purge`(模拟关闭)——让 seen 生命周期也能无头测试。
+  - 脚本会探测自己启动的实例端口,不会踩用户已开的正常实例。
+
 ## ExportOptions.plist
 
 ```xml

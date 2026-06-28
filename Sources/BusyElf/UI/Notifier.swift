@@ -39,4 +39,25 @@ final class Notifier {
             }
         }
     }
+
+    /// 任务异常停止(StopFailure)→ 发紧急横幅。去抖由 TaskStore 负责(只在 →failed 跳变回调)。
+    func notifyFailed(_ session: TaskSession) {
+        let content = UNMutableNotificationContent()
+        content.title = "⚠️ \(session.projectName) 执行失败"
+        let kind = session.errorKind.map { "[\($0)] " } ?? ""
+        let detail = session.errorDetail ?? session.reply ?? "agent 异常停止"
+        content.body = kind + detail
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "busyelf.failed.\(session.id)",
+            content: content,
+            trigger: nil)
+
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                NSLog("BusyElf: 发送失败通知失败: \(error)")
+            }
+        }
+    }
 }
