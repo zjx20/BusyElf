@@ -14,8 +14,10 @@ final class AgentRowView: HoverRow {
     var onForceStop: (() -> Void)?
 
     private let dot = DotView()
+    private let checkView = NSImageView()   // done 态:绿色 ✓(替代圆点,一眼看出已完成)
     private let subtaskArrow = UI.label("↳", size: 12, color: .secondaryLabelColor)
     private let titleLabel = UI.label(size: 13, weight: .semibold)
+    private let promptLabel = UI.label(size: 12, weight: .medium)   // 用户输入:主色、中等字重、1 行截断;跨状态常驻,区分同项目多 harness 的锚点
     private let errorBadge = UI.label(size: 10, weight: .semibold, color: .systemRed)
     private let stuckIcon = NSImageView()
     private let xButton = HoverButton()
@@ -109,16 +111,29 @@ final class AgentRowView: HoverRow {
         let status = session.status
         let title = isSubtask ? subtaskLabel() : session.projectName
 
-        // 状态点
+        // 状态点(done 例外:显示绿色 ✓ 而非圆点,见 statusSlot)
         switch status {
         case .working: dot.color = .systemGreen;  dot.toolTip = "在干活"
         case .waiting: dot.color = .systemOrange; dot.toolTip = "等你处理"
         case .done:    dot.color = .systemGreen;  dot.toolTip = "已完成"
         case .failed:  dot.color = .systemRed;    dot.toolTip = "执行失败"
         }
+        // done 显示 ✓、隐藏圆点;其余三态显示圆点、隐藏 ✓(行对象复用,故每次都要显式切回)
+        let isDone = (status == .done)
+        dot.isHidden = isDone
+        checkView.isHidden = !isDone
 
         titleLabel.stringValue = title
         titleLabel.textColor = (status == .done) ? .secondaryLabelColor : .labelColor   // 完成项降存在感
+
+        // 用户输入行:跨状态常驻(不随完成弱化,它是识别任务的锚点);子任务/无 prompt 整行折叠
+        if let p = firstNonEmpty(session.prompt) {
+            promptLabel.stringValue = Self.oneLine(p)   // 折叠换行/多空白为单行,再由配置截断
+            promptLabel.toolTip = session.prompt         // tooltip 保留完整原文
+            promptLabel.isHidden = false
+        } else {
+            promptLabel.isHidden = true                  // NSStackView 折叠隐藏的 arranged subview,无空行残留
+        }
 
         // 失败类型小红标(仅 failed)
         if status == .failed, let kind = session.errorKind, !kind.isEmpty {
@@ -181,12 +196,10 @@ final class AgentRowView: HoverRow {
         case .failed: parts.append("失败")
         default:      break
         }
-        parts.append(Format.duration(session.elapsed(asOf: now)))
         if let agent = session.agent, !agent.isEmpty { parts.append(agent) }
-        // working 态把用户提示词露在元信息行尾(折叠+截断);子任务无 prompt。
-        if session.status == .working, let p = firstNonEmpty(session.prompt) {
-            parts.append(Self.oneLine(p))
-        }
+        // 时间放最末尾:它每秒刷新、宽度随字符数变(4s→10s→1m),搁前面会把后续文字整体左右推 → 抖动。
+        // 末尾生长、其后无内容,前部稳定不动(配合 thirdLabel 等宽数字)。prompt 已移到专属行,不再拼这里。
+        parts.append(Format.duration(session.elapsed(asOf: now)))
         return parts.joined(separator: " · ")
     }
 
@@ -203,6 +216,31 @@ final class AgentRowView: HoverRow {
     // MARK: - 子视图构建
 
     private func makeContentView() -> NSView {
+        // done 态的绿色 ✓:与圆点同槽位居中,只是字形更醒目(粗体钩)
+        checkView.image = UI.symbol("checkmark", size: 11, weight: .bold)
+        checkView.contentTintColor = .systemGreen
+        checkView.translatesAutoresizingMaskIntoConstraints = false
+        checkView.toolTip = "已完成"
+        checkView.isHidden = true
+        checkView.setContentHuggingPriority(.required, for: .horizontal)
+
+        // 状态指示槽:固定宽度,内居中放圆点(working/waiting/failed)或 ✓(done)。
+        // 钩比圆点宽,走固定槽保证各行标题左缘对齐、不随状态抖动。
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        let statusSlot = NSView()
+        statusSlot.translatesAutoresizingMaskIntoConstraints = false
+        statusSlot.setContentHuggingPriority(.required, for: .horizontal)
+        statusSlot.addSubview(dot)
+        statusSlot.addSubview(checkView)
+        NSLayoutConstraint.activate([
+            statusSlot.widthAnchor.constraint(equalToConstant: 14),
+            statusSlot.heightAnchor.constraint(equalToConstant: 14),
+            dot.centerXAnchor.constraint(equalTo: statusSlot.centerXAnchor),
+            dot.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
+            checkView.centerXAnchor.constraint(equalTo: statusSlot.centerXAnchor),
+            checkView.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
+        ])
+
         stuckIcon.image = UI.symbol("exclamationmark.triangle.fill", size: 10)
         stuckIcon.contentTintColor = .systemYellow
         stuckIcon.translatesAutoresizingMaskIntoConstraints = false
@@ -255,8 +293,14 @@ final class AgentRowView: HoverRow {
         secondLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         thirdLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         thirdLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 等宽数字:时间逐秒变化时数字列不抖(配合"时间放末尾"双保险,见 thirdLineText)。
+        thirdLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
 
-        var row1Views: [NSView] = [dot]
+        // 用户输入行:同 secondLabel 的低水平抗压/低 hugging,长文本截断而绝不横向撑宽 popover。
+        promptLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        promptLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        var row1Views: [NSView] = [statusSlot]
         if isSubtask { row1Views.append(subtaskArrow) }
         // × 与确认/取消按钮都贴在尾部同一槽位:常规态只显示 ×;确认态 × 隐藏、显示"取消 确认移除"
         //(确认移除在最右,正落在原 × 处,鼠标无需移动)。
@@ -267,13 +311,13 @@ final class AgentRowView: HoverRow {
         row1.spacing = 6
         row1.translatesAutoresizingMaskIntoConstraints = false
 
-        let v = NSStackView(views: [row1, secondLabel, thirdLabel])
+        let v = NSStackView(views: [row1, promptLabel, secondLabel, thirdLabel])
         v.orientation = .vertical
         v.alignment = .leading
         v.spacing = 3
         v.translatesAutoresizingMaskIntoConstraints = false
-        // 三行都撑满容器宽度:row1 让 × 贴右,标签在右边距处截断
-        for sub in [row1, secondLabel, thirdLabel] {
+        // 各行都撑满容器宽度:row1 让 × 贴右,标签在右边距处截断
+        for sub in [row1, promptLabel, secondLabel, thirdLabel] {
             sub.leadingAnchor.constraint(equalTo: v.leadingAnchor).isActive = true
             sub.trailingAnchor.constraint(equalTo: v.trailingAnchor).isActive = true
         }
