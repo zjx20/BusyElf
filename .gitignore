@@ -23,3 +23,7 @@ busyelf-hook-capture.ndjson
 
 # Claude Code 本地设置(含 BusyElf 适配器钩子;个人本地,不入库)
 .claude/settings.local.json
+
+# CI 打包产物(scripts/ci-package.sh)
+dist/
+*.dmg

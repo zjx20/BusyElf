@@ -17,16 +17,17 @@ targets:
   BusyElf:
     type: application
     platform: macOS
-    sources: [Sources/BusyElf]
-    resources:
-      - path: Resources
-        excludes: ["README.md"]   # 别把开发文档打进 .app/Contents/Resources
+    sources:
+      - Sources/BusyElf
+      - path: Resources               # XcodeGen 按扩展名分流:AppIcon.icns 自动进 Resources 构建阶段
+        excludes: ["README.md"]        # README 是开发文档,不打进 .app/Contents/Resources
     # XcodeGen 直接由这些属性生成 Info.plist,无需单独 Info.plist 文件
     info:
       path: BusyElf-Info.plist
       properties:
         LSUIElement: true                 # 菜单栏 app,无 Dock 图标
         CFBundleName: BusyElf
+        CFBundleIconFile: AppIcon         # Resources/AppIcon.icns(源:design/AppIcon.svg,见 scripts/make-icon.sh)
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "14.0"

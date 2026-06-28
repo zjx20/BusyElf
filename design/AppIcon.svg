@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- BusyElf 应用图标(夜间蓝):深蓝圆角方形 + 青色发光闪电。
+       与菜单栏 bolt.fill 主题一致;主题寓意"熬夜干活、不让电脑睡"。
+       这是图标的唯一真相源;改它后跑 scripts/make-icon.sh 重新生成 Resources/AppIcon.icns。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1E3A8A"/><stop offset="1" stop-color="#0B1437"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9CFCFF"/><stop offset="1" stop-color="#2BB7E0"/>
+    </linearGradient>
+    <radialGradient id="hi" cx="0.5" cy="0.14" r="0.85">
+      <stop offset="0" stop-color="#9FC2FF" stop-opacity="0.32"/><stop offset="1" stop-color="#9FC2FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feDropShadow dx="0" dy="0" stdDeviation="26" flood-color="#5BE9FF" flood-opacity="0.65"/>
+    </filter>
+    <clipPath id="squircle"><rect x="100" y="100" width="824" height="824" rx="185" ry="185"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#hi)"/>
+  <!-- 闪电 + 青色光晕,裁进圆角内,不溢出到画布角 -->
+  <g clip-path="url(#squircle)">
+    <g transform="translate(178,180) scale(42)" fill="url(#bolt)" filter="url(#glow)">
+      <path d="M5.52.359A.5.5 0 0 1 6 0h4a.5.5 0 0 1 .474.658L8.694 6H12.5a.5.5 0 0 1 .395.807l-7 9a.5.5 0 0 1-.873-.454L6.823 9.5H3.5a.5.5 0 0 1-.48-.641z"/>
+    </g>
+  </g>
+</svg>

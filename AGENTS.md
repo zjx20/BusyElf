@@ -115,10 +115,12 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 - **反复推理框架行为失败时,立刻插桩测量,别接着猜。** popover "撑大缩不回" 曾改了 4 轮(fittingSize 时机 / 表头 hugging / compression resistance)都没消失——全是基于"看似合理"的推理。真凶(`view.fittingSize` 含 `NSScrollView` + 隐藏 `emptyView` 时**恒返回错值**)是加一行 `NSLog` 打出 `listFrameH/constraint/fittingH` 后**一眼看出**的。**对 AutoLayout / fittingSize / NSStackView 这类行为别凭脑补下"根因"结论;打日志看真实数值。**
 - **含 `NSScrollView` 的层级,别用 `view.fittingSize` 求 popover 高度。** 滚动视图设计上就"内容任意大、自己滚动",不会把内容高报成自身尺寸。要"列表跟内容长但封顶 320 then 滚动",必须**自己量** `listStack`(普通 stack)的真实高度、取 `min(,320)` 写进 scrollView 的**显式高度约束**,再**逐项求和**(header/footer/分隔线各自 intrinsic + 内容区)算出 `preferredContentSize`。见 `PopoverController.syncContentSize`。
 - **行高会变的 UI 别切换到"另一处的更高视图"**(易被裁)。就地原地变换(如 × 原地换成确认按钮),高度不变最稳。
+- **XcodeGen 没有 `resources:` target 键——写了被静默忽略。** 资源(如 `AppIcon.icns`)必须挂在 `sources` 下,XcodeGen 按扩展名自动分流到 Resources 构建阶段。曾因这个空操作让图标打不进 .app(`Contents/Resources` 为空、pbxproj 0 引用),改成 `sources: - path: Resources` 才修复。验证:`grep AppIcon.icns *.xcodeproj/project.pbxproj` + 看包内 `Contents/Resources/`。
 
 ## 约定
 
 - 注释用**中文**,与现有风格一致;命名/缩进/惯用法贴合周边代码。
+- **发布**走免开发者账号的 ad-hoc 路线(`scripts/ci-package.sh` + `.github/workflows/release.yml`):矩阵 `arm64+x86_64`、各出 zip/dmg、单 release job 汇总(`docs/BUILD.md`)。`ci-package.sh` 本地可复现一条腿。用户需一次性放行 Gatekeeper(右键打开在 Sequoia/Tahoe 已失效)。升级到 Developer ID 签名+公证见 BUILD.md。图标:源 `design/AppIcon.svg` → `scripts/make-icon.sh` → `Resources/AppIcon.icns`(`CFBundleIconFile` 引用)。
 - 端口默认 `17872`(可经 `defaults write elf.busyelf httpPort N` 改),被占用回退 `17873/17874/17875`(`LoopbackServer.candidatePorts(preferred:)`,首选端口在前);右键菜单显示实际监听地址。适配器 URL 写死默认端口,文档已提示回退。
 - 默认仅 loopback;右键菜单可切「监听所有网口 (0.0.0.0)」(`AppConfig.listenOnAllInterfaces` + `server.restart()`),无鉴权,仅可信网络用。
 - 仅 loopback 可达、**无鉴权**(纯本机同用户场景,刻意从简)。
@@ -135,5 +137,5 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 | `docs/adapters/claude-code.md` | Claude Code 适配:方式 A(HTTP hook,零依赖)/ B(jq+curl);字段映射 |
 | `docs/SETUP.md` | 2 分钟把 Claude Code 接进来(推荐 hooks 配置) |
 | `docs/UX.md` | 菜单栏 / popover / 提醒 / 强制结束的 UI 设计 |
-| `docs/BUILD.md` | 纯 CLI 构建/签名/公证 + **测试**说明 |
+| `docs/BUILD.md` | 纯 CLI 构建 + **发布**(免账号 ad-hoc 双架构 zip/dmg;升级:签名+公证)+ 图标 + **测试** |
 | `docs/claude-code-hooks.md` | Claude Code hooks 官方参考(权威字段来源) |
