@@ -20,6 +20,12 @@ final class PopoverController: NSViewController {
     private let listStack = NSStackView()
     private let scrollView = NSScrollView()
     private let emptyView = PopoverController.makeEmptyView()
+    private var listHeightConstraint: NSLayoutConstraint!   // scrollView 高度 = min(列表内容高, 320),显式承载
+    private var isPopoverVisible = false                    // popover 当前是否可见(决定终态项是否即时标 seen)
+    private var headerView: NSView!                         // 求和算高度用(不查整树 fittingSize)
+    private var footerView: NSView!
+    private var sep1: NSView!
+    private var sep2: NSView!
 
     // 底部
     private let stopAllContainer = NSView()
@@ -41,8 +47,12 @@ final class PopoverController: NSViewController {
         let header = makeHeader()
         let footer = makeFooter()
         buildList()
+        headerView = header
+        footerView = footer
+        sep1 = UI.separator()
+        sep2 = UI.separator()
 
-        for v in [header, UI.separator(), scrollView, emptyView, UI.separator(), footer] {
+        for v in [header, sep1!, scrollView, emptyView, sep2!, footer] {
             root.addArrangedSubview(v)
             v.leadingAnchor.constraint(equalTo: root.leadingAnchor).isActive = true
             v.trailingAnchor.constraint(equalTo: root.trailingAnchor).isActive = true
@@ -54,20 +64,28 @@ final class PopoverController: NSViewController {
     override func viewWillAppear() {
         super.viewWillAppear()
         now = Date()
+        isPopoverVisible = true
         displaySwitch.state = SleepGuard.shared.keepsDisplayAwake ? .on : .off
         loginSwitch.state = LoginItem.isEnabled ? .on : .off
-        // 打开即把当前终态项标记为 seen(清菜单栏角标);本次仍显示它们。
-        TaskStore.shared.markTerminalSeen()
-        rebuild()
+        rebuild()   // rebuild 在可见时会 markTerminalSeen(清角标),本次仍显示这些终态项
         startTicker()
     }
 
     override func viewDidDisappear() {
         super.viewDidDisappear()
+        isPopoverVisible = false
         stopTicker()
         confirmingStopAll = false
         // 关闭即清理掉已 seen 的终态项 → 下次打开就不再显示。
         TaskStore.shared.purgeSeenTerminal()
+    }
+
+    /// 布局结算后再同步一次尺寸。viewWillAppear/rebuild 期算的 fittingSize 可能是未结算的旧值,
+    /// 导致 popover 撑大后缩不回(余高被根 stack 摊给表头,bolt/标题浮到中间)。
+    /// `syncContentSize` 带去重(高度变化 >0.5 才设),设后触发的再次布局会收敛、不会死循环。
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        syncContentSize()
     }
 
     // MARK: - 外部数据入口(AppDelegate 在 onChange 时调用)
@@ -119,6 +137,9 @@ final class PopoverController: NSViewController {
         updateHeader()
         updateFooter()
         syncContentSize()
+        // popover 可见期间出现/变为终态的项也即时标 seen(立刻清菜单栏角标),关闭时一并清理。
+        // 解决"开着 popover 眼看任务变 done,关闭后绿点还在、下次打开还显示一次"。
+        if isPopoverVisible { TaskStore.shared.markTerminalSeen() }
     }
 
     /// 展示顺序:顶层任务按原排序输出,每个父任务后紧跟它的子任务(subagent)。
@@ -142,15 +163,36 @@ final class PopoverController: NSViewController {
         return ordered
     }
 
-    /// 让 popover 高度跟内容走。`NSPopover` 长高很积极,但内容变矮(任务清空)时**不会自动缩回**——
-    /// 残余高度会被根 stack 摊给最易拉伸的头部,把 bolt/⋯ 浮到中间,看着像"残留一个占大半篇幅的 item"。
-    /// 显式同步 `preferredContentSize`(NSPopover 会观察它)即可在增/减两个方向都缩放到内容实际高度。
+    /// 内容尺寸的唯一真相,两步、都确定,不依赖含 NSScrollView 的模糊 fittingSize:
+    /// 1) 量出 `listStack`(普通 stack,布局后 frame 完全可靠)的真实高度,封顶 320,写进 scrollView 的
+    ///    **显式高度约束** —— 于是 scrollView 高度是个确定常量。
+    /// 2) 此时整棵树高度完全确定,`view.fittingSize` 可靠,据此设 `preferredContentSize`(NSPopover 观察它,
+    ///    增/减都缩放)。带阈值去重,避免 viewDidLayout 反馈死循环。
     private func syncContentSize() {
+        // 1) 布局后量 listStack 真实高度(普通 stack 的 frame,在固定 340 宽下完全可靠;它在 documentView 里,
+        //    高度由内容决定、不受 scrollView 当前高度裁剪),封顶 320 写进 scrollView 的显式高度约束。
         view.layoutSubtreeIfNeeded()
-        let h = view.fittingSize.height
-        guard h > 0 else { return }
-        let size = NSSize(width: contentWidth, height: h)
-        if preferredContentSize != size { preferredContentSize = size }
+        let listH = sessions.isEmpty ? 0 : min(listStack.frame.height.rounded(), 320)
+        if abs(listHeightConstraint.constant - listH) > 0.5 {
+            listHeightConstraint.constant = listH
+        }
+        // 2) **确定性求和**,不查整棵树的 view.fittingSize ——
+        //    后者把隐藏的 emptyView 也算进去、且不反映 scrollView 的显式高度(实测恒为 336),是反复出 bug 的根。
+        //    每一项都用各自部件的 intrinsic fittingSize(不受根 stack 拉伸影响)+ 量得的内容区高,逐项相加。
+        // header/footer 用 intrinsic fittingSize(它俩可能被根 stack 拉伸,frame 不可靠);
+        // 分隔线高度固定不拉伸,用布局后的 frame(NSBox 的 fittingSize 可能为 0 会低估);
+        // 内容区:非空 = listH(scrollView 显式高),空 = emptyView intrinsic。
+        let contentH = sessions.isEmpty ? emptyView.fittingSize.height : listH
+        let total = (headerView.fittingSize.height
+                     + sep1.frame.height
+                     + sep2.frame.height
+                     + footerView.fittingSize.height
+                     + contentH
+                     + 6).rounded()   // 6 = 根 stack 底部 edgeInset
+        guard total > 0 else { return }
+        if abs(preferredContentSize.height - total) > 0.5 || preferredContentSize.width != contentWidth {
+            preferredContentSize = NSSize(width: contentWidth, height: total)
+        }
     }
 
     private func updateHeader() {
@@ -269,6 +311,9 @@ final class PopoverController: NSViewController {
             overflow.centerYAnchor.constraint(equalTo: titleStack.centerYAnchor),
             titleStack.trailingAnchor.constraint(lessThanOrEqualTo: overflow.leadingAnchor, constant: -8),
         ])
+        // 表头永不被根 stack 拉伸:有余高时摊给可滚动列表区,而不是把 bolt/标题顶到中间。
+        container.setContentHuggingPriority(.required, for: .vertical)
+        container.setContentCompressionResistancePriority(.required, for: .vertical)
         return container
     }
 
@@ -313,11 +358,11 @@ final class PopoverController: NSViewController {
         scrollView.documentView = doc
         doc.widthAnchor.constraint(equalTo: scrollView.widthAnchor).isActive = true
 
-        // 高度 = 内容高度,封顶 320,超出滚动
-        let fit = scrollView.heightAnchor.constraint(equalTo: doc.heightAnchor)
-        fit.priority = .defaultHigh
-        fit.isActive = true
-        scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
+        // 高度由 syncContentSize 量出列表真实高度(封顶 320)后写入这个显式常量约束。
+        // 不用 `==doc @ 高优先级` 这类模糊约束:含 NSScrollView 的 view.fittingSize 对它不可靠,
+        // 正是 popover "撑大缩不回" 反复复发的根源。显式常量让整棵树高度完全确定。
+        listHeightConstraint = scrollView.heightAnchor.constraint(equalToConstant: 0)
+        listHeightConstraint.isActive = true
     }
 
     private func makeFooter() -> NSView {

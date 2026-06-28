@@ -102,6 +102,12 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 
 ---
 
+## 调试教训(踩过的坑)
+
+- **反复推理框架行为失败时,立刻插桩测量,别接着猜。** popover "撑大缩不回" 曾改了 4 轮(fittingSize 时机 / 表头 hugging / compression resistance)都没消失——全是基于"看似合理"的推理。真凶(`view.fittingSize` 含 `NSScrollView` + 隐藏 `emptyView` 时**恒返回错值**)是加一行 `NSLog` 打出 `listFrameH/constraint/fittingH` 后**一眼看出**的。**对 AutoLayout / fittingSize / NSStackView 这类行为别凭脑补下"根因"结论;打日志看真实数值。**
+- **含 `NSScrollView` 的层级,别用 `view.fittingSize` 求 popover 高度。** 滚动视图设计上就"内容任意大、自己滚动",不会把内容高报成自身尺寸。要"列表跟内容长但封顶 320 then 滚动",必须**自己量** `listStack`(普通 stack)的真实高度、取 `min(,320)` 写进 scrollView 的**显式高度约束**,再**逐项求和**(header/footer/分隔线各自 intrinsic + 内容区)算出 `preferredContentSize`。见 `PopoverController.syncContentSize`。
+- **行高会变的 UI 别切换到"另一处的更高视图"**(易被裁)。就地原地变换(如 × 原地换成确认按钮),高度不变最稳。
+
 ## 约定
 
 - 注释用**中文**,与现有风格一致;命名/缩进/惯用法贴合周边代码。
