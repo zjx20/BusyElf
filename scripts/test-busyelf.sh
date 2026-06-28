@@ -95,6 +95,19 @@ hook '{"hook_event_name":"Notification","session_id":"GHOST","notification_type"
 expect "idle_prompt 不创建幽灵项" "$(has GHOST)" "false"
 expect "仍只有 1 个任务" ".count" "1"
 
+group "权限弹窗:PermissionRequest → waiting(IDE/交互模式真实信号,非 Notification)"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"PR","cwd":"/p","prompt":"跑命令"}'
+hook '{"hook_event_name":"PreToolUse","session_id":"PR","tool_name":"Bash","tool_input":{"command":"python3 -c x"}}'
+expect "PreToolUse → working(即将执行)" "$(st PR)" "working"
+hook '{"hook_event_name":"PermissionRequest","session_id":"PR","tool_name":"Bash","tool_input":{"command":"python3 -c x"}}'
+expect "PermissionRequest → waiting" "$(st PR)" "waiting"
+expect "等批准期间放行休眠" ".blocking" "false"
+expect "需批准文案=工具:细节" "$(fld PR waitingMessage)" "需批准 Bash:python3 -c x"
+hook '{"hook_event_name":"PostToolUse","session_id":"PR","tool_name":"Bash","tool_input":{"command":"python3 -c x"}}'
+expect "批准后 PostToolUse → 复活 working" "$(st PR)" "working"
+expect "复活后重新阻止休眠" ".blocking" "true"
+
 group "复活:终态/waiting 被 update 拉回 working(乱序/恢复)"
 hook '{"hook_event_name":"PostToolUse","session_id":"A","tool_name":"Edit","tool_input":{"file_path":"a.go"}}'
 expect "waiting → working" "$(st A)" "working"

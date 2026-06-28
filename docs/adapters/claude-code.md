@@ -19,6 +19,7 @@
 | `PostToolUseFailure` | `update`(`toolFailed:true`) | 工具执行失败 → 动作行打 ✗(`error`→`toolError` 作 tooltip);失败是常态、非任务中断,仍 `working` |
 | `MessageDisplay` | `update`(reply) | 助手文本流式输出 → 实时回复(`delta`,replace/append) |
 | `Notification` | `wait` / 忽略 | 按 `notification_type`:`permission_prompt` → wait;`idle_prompt` 等 → 忽略 |
+| `PermissionRequest` | `wait` | 权限弹窗出现 = 等用户批准工具 → waiting + 放行休眠 + 提醒。**IDE/交互模式的真实信号**(实测此时不发 Notification);批准后 `PostToolUse` 复活 working |
 | `Stop` | `done` | turn 正常结束 = 完成(留存提示,非移除) |
 | `SubagentStop` | `done`(子任务) | subagent 完成(`last_assistant_message` 作回复) |
 | `StopFailure` | `fail` | turn 因 API 错误异常停止(`error` / `error_details` / 错误原文) |
@@ -34,6 +35,8 @@
 - `idle_prompt`(答完在等下一句)/ 其它类型 → **忽略**,不产生幽灵等待项。
 
 **AskUserQuestion / ExitPlanMode 走 `PreToolUse` 而非 Notification**:权威文档与实测均确认,这两个"阻塞等用户交互"的内建工具**不发任何 `Notification`**(只发 `Pre`/`PostToolUse`)。若仍按普通工具当 `update→working`,任务会在等用户的整段时间里卡 `working`、误挡休眠、不点亮关注(曾经的 bug)。故适配器在 `PreToolUse` 阶段对这两个 `tool_name` 翻成 `wait`:进 waiting + 放行休眠 + 提醒;`waitingMessage` 取第一个问题文本(ExitPlanMode 固定为"等待批准计划")。用户应答后的 `PostToolUse` 走 `update→working` 自动复活——与 `permission_prompt` 的 wait→复活同一条路径。注意 `Notification` 的 `elicitation_dialog` 是 **MCP 服务器** 的 elicitation,与内建的 AskUserQuestion 无关。
+
+**权限弹窗的真实信号是 `PermissionRequest`,不是 `Notification`**:实测(VSCode 扩展 / `acceptEdits` 等需批准的模式)——某个工具调用需用户批准时,Claude Code 发的是 **`PermissionRequest`**(带 `tool_name`/`tool_input`/`permission_suggestions`),**并不发** `Notification(permission_prompt)`(后者似乎只在部分环境/窗口失焦时作系统提醒)。所以光订阅 `Notification` 抓不到权限等待 → 任务卡 `working` 误挡休眠(曾经的 bug)。适配器把 `PermissionRequest` → `wait`(`waitingMessage` = "需批准 工具: 细节"),批准后 `PostToolUse`→`working` 复活,拒绝则后续事件接管。两条信号(`Notification(permission_prompt)` 与 `PermissionRequest`)都保留、都通向 `wait`,互为不同环境的冗余兜底。BusyElf 对 `PermissionRequest` 一律回 2xx 空体 → **不返回任何 permission 决定,绝不自动批准/拦截**,纯被动观察。`bypassPermissions` 模式下不弹窗、不发 `PermissionRequest`,本就无需 waiting。
 
 **subagent**:在 subagent 内触发的事件带 `agent_id`(区分主线程 vs 子任务)+ `agent_type`(名字)。BusyElf 把 `agent_id` 折进 task id(`session#agent_id`),`parentId`=session,于是子任务作为独立行挂在父任务下。`SubagentStart`→建子任务,`SubagentStop`→子任务完成。
 
@@ -52,6 +55,7 @@
     "PostToolUseFailure": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "MessageDisplay":   [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "Notification":     [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "SubagentStart":    [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "SubagentStop":     [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],
     "Stop":             [{ "hooks": [{ "type": "http", "url": "http://127.0.0.1:17872/claude/hooks", "timeout": 5 }] }],

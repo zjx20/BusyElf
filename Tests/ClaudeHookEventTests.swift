@@ -102,6 +102,19 @@ final class ClaudeHookEventTests: XCTestCase {
         XCTAssertEqual(e?.action, .ignore)     // idle 不产生等待项
     }
 
+    func testPermissionRequestWaits() {
+        // 真实权限弹窗走 PermissionRequest(非 Notification)→ wait;文案=需批准 工具:细节。
+        let e = parse(#"{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"Bash","tool_input":{"command":"python3 -c x"}}"#)
+        XCTAssertEqual(e?.id, "s")
+        XCTAssertEqual(e?.action, .wait(message: "需批准 Bash:python3 -c x"))
+    }
+
+    func testPermissionRequestWithoutDetail() {
+        // 取不到细节也安全:只用工具名。
+        let e = parse(#"{"hook_event_name":"PermissionRequest","session_id":"s","tool_name":"WebFetch","tool_input":{}}"#)
+        XCTAssertEqual(e?.action, .wait(message: "需批准 WebFetch"))
+    }
+
     func testStopMapsToDoneWithReply() {
         let e = parse(#"{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"完成了"}"#)
         XCTAssertEqual(e?.action, .done(reply: "完成了"))

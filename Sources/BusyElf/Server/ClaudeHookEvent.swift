@@ -19,6 +19,7 @@ import Foundation
 ///   - `PostToolUseFailure` → update (工具失败 → toolFailed=true 打 ✗;失败是常态非终态,仍 working;error 进 toolError 作 tooltip)
 ///   - `MessageDisplay`   → update  (助手实时回复 delta → reply,replace/append)
 ///   - `Notification`     → wait / ignore  (按 notification_type:permission 才 wait,idle 忽略)
+///   - `PermissionRequest`→ wait    (权限弹窗出现 = 等用户批准工具;真实弹窗的可靠信号,IDE/交互模式不发 Notification)
 ///   - `Stop`/`SessionEnd`/`SubagentStop` → done  (turn / 会话 / 子任务正常结束)
 ///   - `StopFailure`      → fail    (turn 因 API 错误结束:error / error_details / 错误原文)
 ///   - 其余事件           → ignore  (安全无副作用,容忍用户多配了 hook)
@@ -128,11 +129,27 @@ struct ClaudeHookEvent {
 
         case "Notification":
             // 读 notification_type 区分:permission(真等待)才 wait;idle 等不产生等待项。
+            // 注意:Notification(permission_prompt) 只在部分环境/窗口失焦时作为系统提醒发出,
+            // **不是**权限弹窗的可靠信号——可靠信号是下面的 PermissionRequest。两者都通向 wait(冗余兜底)。
             let kind = Self.string(dict, "notification_type")
             if kind == "permission_prompt" || kind == "elicitation_dialog" {
                 action = .wait(message: Self.string(dict, "message"))
             } else {
                 action = .ignore
+            }
+
+        case "PermissionRequest":
+            // 权限弹窗出现 = agent 挂起等用户批准/拒绝某个工具调用。实测:IDE / 交互模式下真实权限弹窗
+            // 走的就是 PermissionRequest(带 tool_name / tool_input / permission_suggestions),而**不发**
+            // Notification(permission_prompt)。故 → wait:进 waiting + 放行休眠 + 点亮关注。批准后 PostToolUse
+            // → working 复活;拒绝则后续 MessageDisplay / 下一个工具 / Stop 自然接管(与 wait 的复活同一路径)。
+            // BusyElf 始终回 2xx 空体 → 不返回任何 permission 决定,绝不影响权限流程(纯被动观察)。
+            let tool = Self.string(dict, "tool_name")
+            let detail = Self.toolDetail(dict["tool_input"] as? [String: Any])
+            if let tool {
+                action = .wait(message: detail.map { "需批准 \(tool):\($0)" } ?? "需批准 \(tool)")
+            } else {
+                action = .wait(message: "需批准工具调用")
             }
 
         case "Stop", "SessionEnd", "SubagentStop":
