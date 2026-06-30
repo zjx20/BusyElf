@@ -307,4 +307,34 @@ final class ClaudeHookEventTests: XCTestCase {
         let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG9","background_tasks":[{"id":"sh9","type":"shell","command":"x"}]}"#)
         XCTAssertTrue(out.contains { $0.id == "BG9#bg:sh9" && $0.action == .update(tool: nil, detail: nil, reply: "x", replyAppend: false, toolComplete: false) })
     }
+
+    // MARK: - 子代理 description 兜底收割(background_tasks 的 subagent 条目 → enrich;关联器漏接时补 prompt)
+
+    /// 常规子代理自身 SubagentStop 的 background_tasks 含自己(type=subagent + description)→ 收割成 enrich(补 prompt)。
+    /// 子代理折叠 id 用 `session#agentId`(无 bg: 前缀),与 SubagentStart 一致;done 与 enrich 同时产出。
+    func testSubagentStopHarvestsOwnDescriptionAsEnrich() {
+        let out = translateAll(#"{"hook_event_name":"SubagentStop","session_id":"S","agent_id":"a1","last_assistant_message":"DONE","background_tasks":[{"id":"a1","type":"subagent","status":"running","description":"找 API 端点","agent_type":"general-purpose"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "S#a1" && $0.action == .done(reply: "DONE") })
+        XCTAssertTrue(out.contains { $0.id == "S#a1" && $0.action == .enrich(prompt: "找 API 端点") })
+    }
+
+    /// 父 Stop 时仍在跑的子代理(type=subagent + description)→ 收割成 enrich;且**不**被折成后台子项(无 #bg: 项)。
+    func testParentStopHarvestsLiveSubagentDescription() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"S","last_assistant_message":"ok","background_tasks":[{"id":"a1","type":"subagent","status":"running","description":"重构登录","agent_type":"Explore"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "S#a1" && $0.action == .enrich(prompt: "重构登录") })
+        XCTAssertFalse(out.contains { $0.id == "S#bg:a1" })   // subagent 不折叠为后台子项(由 SubagentStart/Stop 跟踪)
+    }
+
+    /// workflow 子代理 SubagentStop 的 background_tasks 是父 workflow(type=workflow,非 subagent)→ **不**产生 enrich
+    /// (实测:workflow 子代理自身的 description 不在任何 hook 里,只在其 transcript 文件中)。
+    func testWorkflowSubagentStopProducesNoEnrich() {
+        let out = translateAll(#"{"hook_event_name":"SubagentStop","session_id":"S","agent_id":"wf1","last_assistant_message":"DONE","background_tasks":[{"id":"job1","type":"workflow","status":"running","description":"诊断","name":"probe"}]}"#)
+        XCTAssertFalse(out.contains { if case .enrich = $0.action { return true } else { return false } })
+    }
+
+    /// description 缺失/空的 subagent 条目不产生 enrich(优雅降级,不写空 prompt)。
+    func testSubagentWithoutDescriptionNoEnrich() {
+        let out = translateAll(#"{"hook_event_name":"SubagentStop","session_id":"S","agent_id":"a1","last_assistant_message":"x","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"}]}"#)
+        XCTAssertFalse(out.contains { if case .enrich = $0.action { return true } else { return false } })
+    }
 }

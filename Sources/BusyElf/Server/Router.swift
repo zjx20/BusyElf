@@ -104,6 +104,8 @@ struct Router {
                 store.fail(id: id, parentId: hook.parentId, name: hook.name,
                            errorKind: kind, errorDetail: detail, reply: reply,
                            agent: agent, cwd: hook.cwd)
+            case .enrich(let prompt):
+                store.enrichPrompt(id: id, prompt: prompt)
             case .ignore:
                 break
             }

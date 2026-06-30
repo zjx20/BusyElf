@@ -213,6 +213,7 @@ hook '{"hook_event_name":"SubagentStart","session_id":"P","agent_id":"a2","agent
 expect "子任务输入=Agent 的 description(实时关联)" "$(fld 'P#a2' prompt)" "找 API 端点"
 expect "无前置 Agent 调用的子任务则无输入(降级)" "$(fld 'P#a1' prompt)" "null"
 hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a2","last_assistant_message":"done"}'
+expect "子任务完成(done)后 prompt 仍在(不消失)" "$(fld 'P#a2' prompt)" "找 API 端点"
 hook '{"hook_event_name":"PostToolUse","session_id":"P","agent_id":"a1","agent_type":"Explore","tool_name":"Grep","tool_input":{"pattern":"foo"}}'
 expect "子任务工具刷新" "$(fld 'P#a1' activity)" "Grep: foo"
 hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a1","last_assistant_message":"找到 3 处"}'
@@ -259,6 +260,30 @@ hook '{"hook_event_name":"UserPromptSubmit","session_id":"BGT","prompt":"x"}'
 hook '{"hook_event_name":"Stop","session_id":"BGT","background_tasks":[{"id":"shC","type":"shell","status":"completed","command":"x"}]}'
 expect "明确 completed 的后台条目不折成子项" "$(has 'BGT#bg:shC')" "false"
 expect "BGT 无在跑后台 → 父 done 放行(其它会话仍在跑则总体仍阻塞)" "$(st BGT)" "done"
+
+group "子代理 description 兜底:关联器漏接时从 background_tasks 收割补 prompt"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"SD","cwd":"/proj","prompt":"主任务"}'
+# 无前置 PreToolUse(Agent) → 关联器领不到 → 子任务 prompt 暂空(漏接场景)
+hook '{"hook_event_name":"SubagentStart","session_id":"SD","agent_id":"a1","agent_type":"general-purpose"}'
+expect "子任务无前置 Agent → prompt 暂为空" "$(fld 'SD#a1' prompt)" "null"
+hook '{"hook_event_name":"PostToolUse","session_id":"SD","agent_id":"a1","tool_name":"Bash","tool_input":{"command":"echo hi"}}'
+# SubagentStop 的 background_tasks 含本子代理(type=subagent + description)→ 收割补 prompt
+hook '{"hook_event_name":"SubagentStop","session_id":"SD","agent_id":"a1","last_assistant_message":"done","background_tasks":[{"id":"a1","type":"subagent","status":"running","description":"扫描端点","agent_type":"general-purpose"}]}'
+expect "SubagentStop 从 background_tasks 收割 → 补 prompt" "$(fld 'SD#a1' prompt)" "扫描端点"
+expect "富化不改状态(子任务仍 done)" "$(st 'SD#a1')" "done"
+
+group "workflow 子代理:prompt 不在 hook(维持空)+ activity 留存(UI done 态退化锚点用)"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"WS","cwd":"/proj","prompt":"用 workflow 跑评审"}'
+hook '{"hook_event_name":"SubagentStart","session_id":"WS","agent_id":"wf1","agent_type":"workflow-subagent"}'
+expect "workflow 子代理标签=agent_type" "$(fld 'WS#wf1' name)" "workflow-subagent"
+hook '{"hook_event_name":"PostToolUse","session_id":"WS","agent_id":"wf1","tool_name":"Bash","tool_input":{"command":"echo BUSYELF_PROBE_OK"}}'
+# SubagentStop 的 background_tasks 是父 workflow(type=workflow)→ 不收割(子代理自身 description 不在此)
+hook '{"hook_event_name":"SubagentStop","session_id":"WS","agent_id":"wf1","last_assistant_message":"DONE","background_tasks":[{"id":"job1","type":"workflow","status":"running","description":"评审","name":"review"}]}'
+expect "workflow 子代理 prompt 仍空(hook 无此数据)" "$(fld 'WS#wf1' prompt)" "null"
+expect "activity(做过的活)留存 → UI done 态退化到锚点显示" "$(fld 'WS#wf1' activity)" "Bash: echo BUSYELF_PROBE_OK"
+expect "子代理正常 done" "$(st 'WS#wf1')" "done"
 
 group "需求7:中立 /v1/task/* 与 /claude/hooks 表现力对等(全程中立端点)"
 reset

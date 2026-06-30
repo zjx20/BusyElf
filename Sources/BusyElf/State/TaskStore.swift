@@ -158,6 +158,19 @@ final class TaskStore {
         }
     }
 
+    /// enrichPrompt:**纯展示富化**——给已存在的任务补 prompt(仅当当前为空,不覆盖已有/关联器给的值)。
+    /// 不改 status/lastSeen → 不影响休眠/看门狗;**不存在则忽略**(绝不凭空建项,避免从 background_tasks 的
+    /// subagent 条目重复建项)。用途:把 background_tasks 收割到的子代理 description 兜底补成 UI 输入行
+    /// (关联器漏接的常规子代理)。reconcile 只为刷新 UI(派生量不变)。
+    func enrichPrompt(id: String, prompt: String) {
+        queue.async {
+            guard var s = self.sessions[id], (s.prompt?.isEmpty ?? true), !prompt.isEmpty else { return }
+            s.prompt = prompt
+            self.sessions[id] = s
+            self.reconcile()
+        }
+    }
+
     /// remove:真正移除(用户手动 ×)。级联移除其子任务;幂等。
     func remove(id: String) {
         queue.async {

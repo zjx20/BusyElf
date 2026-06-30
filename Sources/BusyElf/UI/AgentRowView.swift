@@ -124,13 +124,17 @@ final class AgentRowView: HoverRow {
         titleLabel.stringValue = title
         titleLabel.textColor = (status == .done) ? .secondaryLabelColor : .labelColor   // 完成项降存在感
 
-        // 用户输入行:跨状态常驻(不随完成弱化,它是识别任务的锚点);子任务/无 prompt 整行折叠
-        if let p = firstNonEmpty(session.prompt) {
-            promptLabel.stringValue = Self.oneLine(p)   // 折叠换行/多空白为单行,再由配置截断
-            promptLabel.toolTip = session.prompt         // tooltip 保留完整原文
+        // 锚点行(常驻识别行):优先用户 prompt;**无 prompt 的任务**(典型:workflow 子代理——其 prompt/label
+        // 不在 hook 数据里,实测确证)在**非 working 态**退化到 activity(它做过的活)。working 态 activity 已在
+        // 下面主信息行实时显示,故只在 done/failed/waiting 态退化——避免那些态只剩通用标题(如 "workflow-subagent")
+        // + 一句 reply 而看不出做了啥。两者都做 1 行截断,绝不横向撑宽 popover。
+        let promptText = firstNonEmpty(session.prompt)
+        if let anchor = Self.anchorText(prompt: session.prompt, activity: session.activity, status: session.status) {
+            promptLabel.stringValue = Self.oneLine(anchor)   // 折叠换行/多空白为单行,再由配置截断
+            promptLabel.toolTip = promptText != nil ? session.prompt : session.activity   // tooltip 保留完整原文
             promptLabel.isHidden = false
         } else {
-            promptLabel.isHidden = true                  // NSStackView 折叠隐藏的 arranged subview,无空行残留
+            promptLabel.isHidden = true                      // NSStackView 折叠隐藏的 arranged subview,无空行残留
         }
 
         // 失败类型小红标(仅 failed)
@@ -192,6 +196,17 @@ final class AgentRowView: HoverRow {
     /// 子任务标题:优先 name(agentType,如 "Explore"),退化到 "子任务"。
     private func subtaskLabel() -> String {
         session.name.isEmpty ? L.Row.subtask : session.name
+    }
+
+    /// 锚点行文本:优先 prompt;**无 prompt 时**在非 working 态退化到 activity(做过的活)。
+    /// workflow 子代理的任务文本(prompt/label)不在 hook 数据里(实测确证),其 prompt 恒空 →
+    /// 靠这条退化让它在 done/failed/waiting 态仍显示"做了什么",而非只剩通用标题 "workflow-subagent"。
+    /// working 态不退化:那时 activity 已在主信息行实时显示,避免上下两行重复同一句。
+    /// 纯函数,便于单测(行渲染本身无法走 /debug/state 断言)。
+    static func anchorText(prompt: String?, activity: String, status: TaskStatus) -> String? {
+        if let p = prompt, !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return p }
+        guard status != .working else { return nil }
+        return activity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : activity
     }
 
     private func thirdLineText() -> String {

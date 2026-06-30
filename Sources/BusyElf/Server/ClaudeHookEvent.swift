@@ -39,6 +39,9 @@ struct ClaudeHookEvent {
         case wait(message: String?)
         case done(reply: String?)
         case fail(errorKind: String?, errorDetail: String?, reply: String?)
+        /// 纯展示富化:给已存在的子任务补 prompt(从 background_tasks 的 subagent description 收割)。
+        /// 不建项、不改 status、不碰休眠——仅在关联器漏接时兜底点亮"它在干什么"那行。
+        case enrich(prompt: String)
         case ignore
     }
 
@@ -61,6 +64,10 @@ struct ClaudeHookEvent {
     /// nil=该事件无此概念 / 老版本无字段(不做差集);非 nil(含空)=注册表可达,据此差集。
     /// 用 var 仅为让 memberwise init 带默认值 nil(其它构造点无需显式传);构造后不再变。
     var backgroundTasks: [BgTask]? = nil
+    /// 仅 Stop/SessionEnd/SubagentStop 携带:background_tasks 里 `type=="subagent"` 条目的 description,
+    /// 键为折叠 id(`session#agentId`,与 SubagentStart 一致),值为 description。
+    /// 用于**兜底富化**子代理 prompt(关联器漏接时);纯展示,与 `backgroundTasks`(折叠/差集,已剔除 subagent)互补。
+    var subagentDescriptions: [String: String]? = nil
 
     /// 写进任务的来源标签,用于 UI 展示/分组。
     static let agentLabel = "claude-code"
@@ -102,6 +109,7 @@ struct ClaudeHookEvent {
 
         let action: Action
         var bg: [BgTask]? = nil   // 仅父会话 Stop/SessionEnd 设置:用于后台任务差集
+        var subDescs: [String: String]? = nil   // 从 background_tasks 收割的 subagent description(折叠 id→desc)
         switch event {
         case "UserPromptSubmit":
             // `prompt` 为用户提交的文本(权威 hooks 文档确认字段名为 `prompt`)。
@@ -181,16 +189,20 @@ struct ClaudeHookEvent {
             // 同时取 background_tasks(v2.1.145+):turn 结束但仍有后台进程/工作在跑时,据此折叠成后台子项继续阻止休眠。
             action = .done(reply: Self.string(dict, "last_assistant_message"))
             bg = Self.parseBackgroundTasks(dict)   // key 不存在 → nil(老版本/注册表不可达,不做差集)
+            subDescs = Self.parseSubagentDescriptions(dict, session: session)   // 兜底富化:收割在跑子代理的 description
 
         case "SessionEnd":
             // 整个会话结束:无 background_tasks 字段。强制 bg=[](空快照)→ translate 差集会把该会话所有后台子项收尾。
             action = .done(reply: Self.string(dict, "last_assistant_message"))
             bg = []
+            subDescs = Self.parseSubagentDescriptions(dict, session: session)
 
         case "SubagentStop":
             // 子任务结束(parentId != nil):由 SubagentStart/SubagentStop 事件精确跟踪,**不**在此做 background_tasks 差集
             // (其数组是父会话范围,会与父的 Stop 重复;且后台 subagent 的完成有 SubagentStop 这个可靠事件,无需靠"消失"判定)。
+            // 但**收割** background_tasks 里本子代理自身的 description(实测常规子代理的 SubagentStop 会带)→ 兜底补 prompt。
             action = .done(reply: Self.string(dict, "last_assistant_message"))
+            subDescs = Self.parseSubagentDescriptions(dict, session: session)
 
         case "StopFailure":
             // turn 因 API 错误结束。error=类型;last_assistant_message 此处为错误原文。
@@ -203,7 +215,8 @@ struct ClaudeHookEvent {
             action = .ignore
         }
 
-        return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action, backgroundTasks: bg)
+        return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action,
+                               backgroundTasks: bg, subagentDescriptions: subDescs)
     }
 
     /// 在纯 [parse] 之上叠加"子任务输入"关联(有状态)。
@@ -217,27 +230,42 @@ struct ClaudeHookEvent {
     /// 「父 done + 各后台子项 update/done」多个动作(见 [backgroundActions])。非 JSON → 空数组。
     static func translate(_ data: Data) -> [ClaudeHookEvent] {
         guard let e = parse(data) else { return [] }
+        var out: [ClaudeHookEvent]
         switch e.action {
         case let .update(tool, detail, _, _, toolComplete, _, _)
             where (tool == "Agent" || tool == "Task") && !toolComplete:
             if let sid = e.id, let d = detail, !d.isEmpty { correlator.push(session: sid, input: d) }
-            return [e]
+            out = [e]
         case .start(nil) where e.parentId != nil:
-            guard let sid = e.parentId, let input = correlator.pop(session: sid) else { return [e] }
-            return [ClaudeHookEvent(id: e.id, parentId: e.parentId, name: e.name, cwd: e.cwd,
-                                    action: .start(prompt: input))]
+            if let sid = e.parentId, let input = correlator.pop(session: sid) {
+                out = [ClaudeHookEvent(id: e.id, parentId: e.parentId, name: e.name, cwd: e.cwd,
+                                       action: .start(prompt: input))]
+            } else {
+                out = [e]
+            }
         case .done, .fail:
             // 子任务的 done/fail 带 parentId,不在此清;只有父 turn 结束(parentId==nil)才重置该会话暂存。
             if e.parentId == nil, let sid = e.id { correlator.clear(session: sid) }
             // 父会话 Stop/SessionEnd 携带 background_tasks(非 nil)→ 差集翻成后台子项的 update/done。
             // .fail(StopFailure)无此字段(bg=nil),自然跳过。
             if e.parentId == nil, let sid = e.id, let bg = e.backgroundTasks {
-                return Self.backgroundActions(session: sid, cwd: e.cwd, tasks: bg, parentDone: e)
+                out = Self.backgroundActions(session: sid, cwd: e.cwd, tasks: bg, parentDone: e)
+            } else {
+                out = [e]
             }
-            return [e]
         default:
-            return [e]
+            out = [e]
         }
+        // 兜底富化:把 background_tasks 里收割到的 subagent description 翻成 enrich 动作(纯展示,不建项/不改状态/不碰休眠)。
+        // 覆盖关联器漏接的常规子代理(其 SubagentStop / 父 Stop 的 background_tasks 带 type=="subagent" 的 description)。
+        // workflow 子代理不出现在此(其条目是 type=="workflow"),故对 workflow 子代理无副作用。
+        if let descs = e.subagentDescriptions {
+            for (cid, desc) in descs {
+                out.append(ClaudeHookEvent(id: cid, parentId: nil, name: nil, cwd: nil,
+                                           action: .enrich(prompt: desc)))
+            }
+        }
+        return out
     }
 
     /// 把一次父会话 Stop/SessionEnd 的后台任务快照,翻成中立动作序列:
@@ -366,6 +394,23 @@ struct ClaudeHookEvent {
             return BgTask(id: tid, type: type, status: string(item, "status"),
                           command: string(item, "command"), description: string(item, "description"))
         }
+    }
+
+    /// 从 background_tasks **只取** `type=="subagent"` 条目的 description,返回 折叠 id(`session#agentId`)→ description。
+    /// 与 [parseBackgroundTasks] 互补:那个剔除 subagent(用于折叠/差集),这个专取 subagent 的 description(用于兜底富化)。
+    /// 实测:常规 Task/Agent 子代理在自身 `SubagentStop`(及在跑时的父 `Stop`)的 background_tasks 里以 `type:"subagent"`
+    /// 出现并带 `description`(= Agent 工具的 description);而 workflow 子代理**不**出现(其条目是父 workflow,`type:"workflow"`,
+    /// description 是 workflow 而非子代理),故此收割对 workflow 子代理零副作用——它们的 prompt 确实不在任何 hook 里。
+    private static func parseSubagentDescriptions(_ dict: [String: Any], session: String?) -> [String: String]? {
+        guard let session, !session.isEmpty,
+              let arr = dict["background_tasks"] as? [[String: Any]] else { return nil }
+        var map: [String: String] = [:]
+        for item in arr where string(item, "type") == "subagent" {
+            guard let tid = string(item, "id"), !tid.isEmpty,
+                  let desc = string(item, "description"), !desc.isEmpty else { continue }
+            map["\(session)#\(tid)"] = desc   // 折叠 id 与 SubagentStart 一致(子代理无 "bg:" 前缀)
+        }
+        return map.isEmpty ? nil : map
     }
 
     /// 取整型字段。缺失/类型不符 → nil。

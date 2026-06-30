@@ -182,6 +182,34 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertNil(s("P#c"))              // 级联移除子任务
     }
 
+    // MARK: - enrichPrompt(纯展示富化:补 prompt,不建项/不覆盖/不改状态)
+
+    /// 子代理无 prompt 时补上;已有则不覆盖(关联器给的值优先)。
+    func testEnrichPromptFillsEmptyOnly() {
+        start("E#a", parentId: "E", name: "Explore")   // 子任务,无 prompt
+        XCTAssertNil(s("E#a")?.prompt)
+        store.enrichPrompt(id: "E#a", prompt: "找 API 端点")
+        XCTAssertEqual(s("E#a")?.prompt, "找 API 端点")
+        store.enrichPrompt(id: "E#a", prompt: "想覆盖")   // 已有 → 不覆盖
+        XCTAssertEqual(s("E#a")?.prompt, "找 API 端点")
+    }
+
+    /// 不存在的 id 不凭空建项(避免从 background_tasks 的 subagent 条目重复建项)。
+    func testEnrichPromptIgnoresAbsent() {
+        store.enrichPrompt(id: "ghost", prompt: "x")
+        XCTAssertNil(s("ghost"))
+    }
+
+    /// 富化已 done 的子代理:补 prompt 但**不复活**(status 仍 done,休眠不受影响)。
+    func testEnrichPromptDoesNotReviveTerminal() {
+        start("E2#a", parentId: "E2", name: "workflow-subagent")
+        store.done(id: "E2#a", reply: "DONE")
+        store.enrichPrompt(id: "E2#a", prompt: "扫描端点")
+        XCTAssertEqual(s("E2#a")?.status, .done)        // 不改状态
+        XCTAssertEqual(s("E2#a")?.prompt, "扫描端点")
+        XCTAssertFalse(blocking)                         // 不重新阻止休眠
+    }
+
     // MARK: - seen 生命周期
 
     func testSeenLifecycle() {
