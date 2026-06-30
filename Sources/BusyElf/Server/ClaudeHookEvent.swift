@@ -42,11 +42,25 @@ struct ClaudeHookEvent {
         case ignore
     }
 
-    let id: String?        // 折叠后的 task id(主=session_id,子=session_id#agent_id)
+    /// Stop/SubagentStop 输入里的一条后台任务(v2.1.145+ 的 `background_tasks` 数组项)。
+    /// 用于"父 turn 结束但后台进程/工作仍在跑"时识别并折叠成后台子项,持续阻止休眠。
+    struct BgTask: Equatable {
+        let id: String          // 后台任务注册表 id(实测 = shell 的后台句柄 / subagent 的 agent_id,跨 turn 稳定)
+        let type: String?       // shell / workflow / monitor / teammate / cloud session / MCP task(subagent 已在解析时剔除)
+        let status: String?     // 当前状态(实测为 "running";完成的任务直接从数组消失)
+        let command: String?    // shell 命令行(仅 shell)
+        let description: String? // 自由文本描述
+    }
+
+    let id: String?        // 折叠后的 task id(主=session_id,子=session_id#agent_id 或 session_id#bg:taskId)
     let parentId: String?  // 子任务=session_id,否则 nil
-    let name: String?      // 子任务标签=agent_type,否则 nil
+    let name: String?      // 子任务标签=agent_type / 后台任务 type,否则 nil
     let cwd: String?
     let action: Action
+    /// 仅父会话 Stop/SessionEnd 携带:本次快照里的后台任务(已剔除 subagent)。
+    /// nil=该事件无此概念 / 老版本无字段(不做差集);非 nil(含空)=注册表可达,据此差集。
+    /// 用 var 仅为让 memberwise init 带默认值 nil(其它构造点无需显式传);构造后不再变。
+    var backgroundTasks: [BgTask]? = nil
 
     /// 写进任务的来源标签,用于 UI 展示/分组。
     static let agentLabel = "claude-code"
@@ -55,6 +69,10 @@ struct ClaudeHookEvent {
     /// `PreToolUse(Agent)` 里、且**不带 `agent_id`**;`SubagentStart` 只带 `agent_id` 不带输入。
     /// 二者唯一共享键是 `session_id`,实测又是紧邻串行发出,故按 session 暂存、由 SubagentStart 领取。
     private static let correlator = SubagentInputCorrelator()
+
+    /// 后台任务差集跟踪器(有状态):记录每会话上次 Stop 快照里"仍在运行"的后台子项 id 集,
+    /// 用于判定哪些后台任务已"消失=完成"(后台进程退出无事件,只能靠差集)。仅 [translate] 单点调用。
+    private static let bgTracker = BackgroundTaskTracker()
 
     /// 宽容解析。仅当 body 根本不是 JSON 对象时返回 nil(交由 Router 忽略),保证服务端永不因 body 崩。
     static func parse(_ data: Data) -> ClaudeHookEvent? {
@@ -83,6 +101,7 @@ struct ClaudeHookEvent {
         let name = (agentType?.isEmpty == false) ? agentType : nil   // 子任务标签
 
         let action: Action
+        var bg: [BgTask]? = nil   // 仅父会话 Stop/SessionEnd 设置:用于后台任务差集
         switch event {
         case "UserPromptSubmit":
             // `prompt` 为用户提交的文本(权威 hooks 文档确认字段名为 `prompt`)。
@@ -157,8 +176,20 @@ struct ClaudeHookEvent {
                 action = .wait(message: L.Wait.approveToolGeneric)
             }
 
-        case "Stop", "SessionEnd", "SubagentStop":
-            // 正常结束:last_assistant_message 是最终回复文本(无需解析 transcript)。
+        case "Stop":
+            // turn 正常结束:last_assistant_message 是最终回复文本(无需解析 transcript)。
+            // 同时取 background_tasks(v2.1.145+):turn 结束但仍有后台进程/工作在跑时,据此折叠成后台子项继续阻止休眠。
+            action = .done(reply: Self.string(dict, "last_assistant_message"))
+            bg = Self.parseBackgroundTasks(dict)   // key 不存在 → nil(老版本/注册表不可达,不做差集)
+
+        case "SessionEnd":
+            // 整个会话结束:无 background_tasks 字段。强制 bg=[](空快照)→ translate 差集会把该会话所有后台子项收尾。
+            action = .done(reply: Self.string(dict, "last_assistant_message"))
+            bg = []
+
+        case "SubagentStop":
+            // 子任务结束(parentId != nil):由 SubagentStart/SubagentStop 事件精确跟踪,**不**在此做 background_tasks 差集
+            // (其数组是父会话范围,会与父的 Stop 重复;且后台 subagent 的完成有 SubagentStop 这个可靠事件,无需靠"消失"判定)。
             action = .done(reply: Self.string(dict, "last_assistant_message"))
 
         case "StopFailure":
@@ -172,7 +203,7 @@ struct ClaudeHookEvent {
             action = .ignore
         }
 
-        return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action)
+        return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action, backgroundTasks: bg)
     }
 
     /// 在纯 [parse] 之上叠加"子任务输入"关联(有状态)。
@@ -182,24 +213,73 @@ struct ClaudeHookEvent {
     ///   - 父 `PreToolUse(Agent/Task)`(toolComplete=false):暂存其输入(`detail` 已是 description,空则退化 prompt);
     ///   - `SubagentStart`(`.start(nil)` 且有 parentId):领取暂存输入作为子任务 prompt,UI 输入行直接复用;领不到则降级为无输入;
     ///   - 父 turn 结束(`.done`/`.fail` 且无 parentId,即 Stop/SessionEnd/StopFailure):清掉该会话残留暂存(turn 边界=状态重置)。
-    static func translate(_ data: Data) -> ClaudeHookEvent? {
-        guard let e = parse(data) else { return nil }
+    /// 返回**一个或多个**中立动作:绝大多数 hook 是一个;父会话 Stop/SessionEnd 可能展开成
+    /// 「父 done + 各后台子项 update/done」多个动作(见 [backgroundActions])。非 JSON → 空数组。
+    static func translate(_ data: Data) -> [ClaudeHookEvent] {
+        guard let e = parse(data) else { return [] }
         switch e.action {
         case let .update(tool, detail, _, _, toolComplete, _, _)
             where (tool == "Agent" || tool == "Task") && !toolComplete:
             if let sid = e.id, let d = detail, !d.isEmpty { correlator.push(session: sid, input: d) }
-            return e
+            return [e]
         case .start(nil) where e.parentId != nil:
-            guard let sid = e.parentId, let input = correlator.pop(session: sid) else { return e }
-            return ClaudeHookEvent(id: e.id, parentId: e.parentId, name: e.name, cwd: e.cwd,
-                                   action: .start(prompt: input))
+            guard let sid = e.parentId, let input = correlator.pop(session: sid) else { return [e] }
+            return [ClaudeHookEvent(id: e.id, parentId: e.parentId, name: e.name, cwd: e.cwd,
+                                    action: .start(prompt: input))]
         case .done, .fail:
             // 子任务的 done/fail 带 parentId,不在此清;只有父 turn 结束(parentId==nil)才重置该会话暂存。
             if e.parentId == nil, let sid = e.id { correlator.clear(session: sid) }
-            return e
+            // 父会话 Stop/SessionEnd 携带 background_tasks(非 nil)→ 差集翻成后台子项的 update/done。
+            // .fail(StopFailure)无此字段(bg=nil),自然跳过。
+            if e.parentId == nil, let sid = e.id, let bg = e.backgroundTasks {
+                return Self.backgroundActions(session: sid, cwd: e.cwd, tasks: bg, parentDone: e)
+            }
+            return [e]
         default:
-            return e
+            return [e]
         }
+    }
+
+    /// 把一次父会话 Stop/SessionEnd 的后台任务快照,翻成中立动作序列:
+    ///  - 仍在运行的后台任务 → `update`(working)(幂等 upsert,持续阻止休眠;折叠 id=`session#bg:taskId`,parentId=session);
+    ///  - 自上次快照后**消失**的后台任务 → `done`(后台进程退出无任何事件,实测只能靠"上次在、这次不在"判完成)。
+    ///
+    /// 顺序刻意为「先各后台子项 update(working) → 父 done → 各后台子项 done」:让 working 子项在父 done 之前就位,
+    /// 避免父 done 那一刻集合里短暂无 working 项而误放行休眠(IOPMAssertion 抖动)。
+    ///
+    /// 这些都是普通的 update/done(带 parentId)——中立 `/v1/task/*` 同样能表达,适配器只是把 Claude 的快照翻成它们。
+    private static func backgroundActions(session: String, cwd: String?,
+                                          tasks: [BgTask], parentDone: ClaudeHookEvent) -> [ClaudeHookEvent] {
+        // 只把"仍在运行"的折成 working 子项;明确终态的不折(否则会一直阻止休眠到看门狗超时)。
+        // 某任务若上轮在跑、这轮变终态,会因不在 runningIds 而被差集判完成 → done(见下)。
+        let running = tasks.filter { !Self.isTerminalBgStatus($0.status) }
+        let runningIds = Set(running.map { childId(session: session, taskId: $0.id) })
+        let completedIds = bgTracker.reconcile(session: session, running: runningIds)
+
+        var out: [ClaudeHookEvent] = []
+        for t in running {
+            // 后台子项当前动作:shell 显示命令,否则退化到描述(纯展示;popover 会截断)。
+            let detail = (t.command?.isEmpty == false) ? t.command : t.description
+            out.append(ClaudeHookEvent(
+                id: childId(session: session, taskId: t.id), parentId: session, name: t.type, cwd: cwd,
+                action: .update(tool: nil, detail: nil, reply: detail, replyAppend: false, toolComplete: false)))
+        }
+        out.append(parentDone)
+        for cid in completedIds {
+            out.append(ClaudeHookEvent(id: cid, parentId: session, name: nil, cwd: nil, action: .done(reply: nil)))
+        }
+        return out
+    }
+
+    /// 后台任务折叠 id:`session#bg:taskId`。前缀 `bg:` 避免与 subagent 子任务 `session#agentId` 撞 id。
+    private static func childId(session: String, taskId: String) -> String { "\(session)#bg:\(taskId)" }
+
+    /// 后台任务状态是否"已终结"(不再阻止休眠)。实测只见过 "running",但文档未穷举状态值;
+    /// 故保险:仅明确的已知终态字样才算终结,nil / "running" / 未知一律按运行中(守"宁可多醒不可漏醒")。
+    private static func isTerminalBgStatus(_ status: String?) -> Bool {
+        guard let s = status?.lowercased() else { return false }
+        return ["completed", "complete", "done", "finished",
+                "failed", "error", "stopped", "canceled", "cancelled", "killed", "exited"].contains(s)
     }
 
     // MARK: - 接入提示词(onboarding)
@@ -273,6 +353,21 @@ struct ClaudeHookEvent {
         return nil
     }
 
+    /// 解析 Stop 输入里的 `background_tasks`(v2.1.145+)。
+    /// key 不存在 → nil(老版本/注册表不可达,不做差集);存在(含空数组)→ 解析出的列表。
+    /// **剔除 type=="subagent"**:后台子代理由 SubagentStart/SubagentStop 事件精确跟踪(其 id==agent_id,
+    /// 折叠成 `session#agentId`),与这里的 `session#bg:taskId` 不同;若在此一并折叠会重复建项。
+    private static func parseBackgroundTasks(_ dict: [String: Any]) -> [BgTask]? {
+        guard let arr = dict["background_tasks"] as? [[String: Any]] else { return nil }
+        return arr.compactMap { item -> BgTask? in
+            guard let tid = string(item, "id"), !tid.isEmpty else { return nil }
+            let type = string(item, "type")
+            if type == "subagent" { return nil }
+            return BgTask(id: tid, type: type, status: string(item, "status"),
+                          command: string(item, "command"), description: string(item, "description"))
+        }
+    }
+
     /// 取整型字段。缺失/类型不符 → nil。
     private static func int(_ dict: [String: Any], _ key: String) -> Int? {
         if let n = dict[key] as? NSNumber { return n.intValue }
@@ -337,6 +432,39 @@ private final class SubagentInputCorrelator {
     /// 需在持锁下调用:移除某会话的全部暂存与顺序记录。
     private func removeLocked(_ session: String) {
         pending[session] = nil
+        if let i = order.firstIndex(of: session) { order.remove(at: i) }
+    }
+}
+
+/// 后台任务差集跟踪:记录每会话上次 Stop 快照里"仍在运行"的后台子项 id 集合。
+/// 后台进程(shell 等)结束时 Claude Code **不发任何 hook 事件**(实测),只能靠"上次在、这次不在"判完成。
+/// 线程安全(hook 源头串行,仍加锁保内存安全);会话数上限防长跑无界堆积。
+/// 差集失准只会让某后台子项晚一点被 done(看门狗兜底放行休眠),绝不影响休眠正确性。
+private final class BackgroundTaskTracker {
+    private let lock = NSLock()
+    private var lastSeen: [String: Set<String>] = [:]   // session → 上次仍在运行的后台子项折叠 id 集
+    private var order: [String] = []                    // session 插入顺序,用于会话级淘汰
+    private let sessionCap = 64
+
+    /// 用本次快照的运行集刷新该会话,返回"消失了"的子项 id(= 已完成,需置 done)。
+    /// running 为空 → 该会话不再有后台任务,清掉其记录(SessionEnd 走此路:drain 全部)。
+    func reconcile(session: String, running: Set<String>) -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        let prev = lastSeen[session] ?? []
+        let completed = prev.subtracting(running)
+        if running.isEmpty {
+            removeLocked(session)
+        } else {
+            if lastSeen[session] == nil { order.append(session) }
+            lastSeen[session] = running
+            while order.count > sessionCap, let oldest = order.first, oldest != session { removeLocked(oldest) }
+        }
+        return completed
+    }
+
+    /// 需在持锁下调用。
+    private func removeLocked(_ session: String) {
+        lastSeen[session] = nil
         if let i = order.firstIndex(of: session) { order.remove(at: i) }
     }
 }

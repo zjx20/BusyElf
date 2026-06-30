@@ -8,7 +8,12 @@ final class ClaudeHookEventTests: XCTestCase {
         ClaudeHookEvent.parse(Data(json.utf8))
     }
 
+    /// 取主动作(单动作事件的唯一元素)。多动作(父 Stop + 后台子项)的用例直接调 `translateAll`。
     private func translate(_ json: String) -> ClaudeHookEvent? {
+        ClaudeHookEvent.translate(Data(json.utf8)).first
+    }
+
+    private func translateAll(_ json: String) -> [ClaudeHookEvent] {
         ClaudeHookEvent.translate(Data(json.utf8))
     }
 
@@ -218,5 +223,88 @@ final class ClaudeHookEventTests: XCTestCase {
         _ = translate(#"{"hook_event_name":"SubagentStop","session_id":"S6","agent_id":"older","last_assistant_message":"x"}"#)
         let start = translate(#"{"hook_event_name":"SubagentStart","session_id":"S6","agent_id":"a1","agent_type":"Explore"}"#)
         XCTAssertEqual(start?.action, .start(prompt: "给下一个子任务"))
+    }
+
+    // MARK: - 后台任务(background_tasks 差集 → 后台子项;各用独立 session 防 bgTracker 串扰)
+
+    /// parse 抽取 background_tasks 并剔除 subagent;key 不存在 → nil。
+    func testParseExtractsBackgroundTasksSkippingSubagent() {
+        let e = parse(#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"x","type":"shell","command":"c"},{"id":"y","type":"subagent","agent_type":"Explore"}]}"#)
+        XCTAssertEqual(e?.backgroundTasks?.count, 1)         // subagent 被剔除
+        XCTAssertEqual(e?.backgroundTasks?.first?.id, "x")
+        XCTAssertEqual(e?.backgroundTasks?.first?.type, "shell")
+    }
+
+    func testParseStopWithoutBackgroundTasksIsNil() {
+        let e = parse(#"{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"x"}"#)
+        XCTAssertNil(e?.backgroundTasks)                     // 老版本/无字段 → 不做差集
+    }
+
+    /// Stop 携带在跑 shell → 折叠成 working 后台子项(session#bg:id)+ 父 done。
+    func testStopWithBackgroundShellFoldsChild() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG1","last_assistant_message":"done","background_tasks":[{"id":"sh1","type":"shell","status":"running","command":"tail -f log"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "BG1" && $0.action == .done(reply: "done") })
+        let child = out.first { $0.id == "BG1#bg:sh1" }
+        XCTAssertEqual(child?.parentId, "BG1")
+        XCTAssertEqual(child?.name, "shell")
+        XCTAssertEqual(child?.action, .update(tool: nil, detail: nil, reply: "tail -f log", replyAppend: false, toolComplete: false))
+    }
+
+    /// 后台进程退出无事件:靠"上次在、这次不在"判完成 → 该子项 done。
+    func testBackgroundTaskCompletionByDisappearance() {
+        _ = translateAll(#"{"hook_event_name":"Stop","session_id":"BG2","background_tasks":[{"id":"sh2","type":"shell","status":"running","command":"build"}]}"#)
+        let out2 = translateAll(#"{"hook_event_name":"Stop","session_id":"BG2","background_tasks":[]}"#)
+        XCTAssertTrue(out2.contains { $0.id == "BG2#bg:sh2" && $0.action == .done(reply: nil) })
+    }
+
+    /// background_tasks 里的 subagent 不折叠(由 SubagentStart/Stop 跟踪),shell 照折。
+    func testBackgroundTasksSkipSubagentFoldShell() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG3","background_tasks":[{"id":"a9","type":"subagent","status":"running","agent_type":"Explore"},{"id":"sh3","type":"shell","status":"running","command":"x"}]}"#)
+        XCTAssertFalse(out.contains { $0.id == "BG3#bg:a9" })
+        XCTAssertTrue(out.contains { $0.id == "BG3#bg:sh3" })
+    }
+
+    /// SessionEnd 无 background_tasks 字段 → 收尾该会话所有后台子项(drain)+ 父 done。
+    func testSessionEndDrainsBackgroundChildren() {
+        _ = translateAll(#"{"hook_event_name":"Stop","session_id":"BG4","background_tasks":[{"id":"sh4","type":"shell","status":"running","command":"x"}]}"#)
+        let out = translateAll(#"{"hook_event_name":"SessionEnd","session_id":"BG4","reason":"exit"}"#)
+        XCTAssertTrue(out.contains { $0.id == "BG4" && $0.action == .done(reply: nil) })
+        XCTAssertTrue(out.contains { $0.id == "BG4#bg:sh4" && $0.action == .done(reply: nil) })
+    }
+
+    /// Stop 无 background_tasks → 仍是单一父 done(老行为不退化)。
+    func testStopWithoutBackgroundTasksSingleAction() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG5","last_assistant_message":"ok"}"#)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first?.action, .done(reply: "ok"))
+    }
+
+    /// 后台子项 update 排在父 done 之前(避免父 done 那刻集合短暂无 working 项而误放行休眠)。
+    func testBackgroundChildUpdateOrderedBeforeParentDone() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG6","background_tasks":[{"id":"sh6","type":"shell","status":"running","command":"x"}]}"#)
+        let childIdx = out.firstIndex { $0.id == "BG6#bg:sh6" }
+        let parentIdx = out.firstIndex { $0.id == "BG6" }
+        XCTAssertNotNil(childIdx); XCTAssertNotNil(parentIdx)
+        XCTAssertLessThan(childIdx!, parentIdx!)
+    }
+
+    /// 明确终态状态(如 "completed")的条目不折成 working 子项(否则会一直挡休眠到看门狗超时)。
+    func testBackgroundTerminalStatusNotFoldedAsWorking() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG7","background_tasks":[{"id":"sh7","type":"shell","status":"completed","command":"x"}]}"#)
+        XCTAssertFalse(out.contains { $0.id == "BG7#bg:sh7" })   // 首次即终态 → 既不 update 也无需 done
+    }
+
+    /// 状态从 running 翻成 completed(仍在数组里)→ 差集判完成 → done,且不再 update(working)。
+    func testBackgroundRunningThenTerminalStatusCompletes() {
+        _ = translateAll(#"{"hook_event_name":"Stop","session_id":"BG8","background_tasks":[{"id":"sh8","type":"shell","status":"running","command":"x"}]}"#)
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG8","background_tasks":[{"id":"sh8","type":"shell","status":"completed","command":"x"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "BG8#bg:sh8" && $0.action == .done(reply: nil) })
+        XCTAssertFalse(out.contains { e in if case .update = e.action { return e.id == "BG8#bg:sh8" } else { return false } })
+    }
+
+    /// 未知/缺省状态默认按运行中(宁可多醒不可漏醒)。
+    func testBackgroundUnknownStatusTreatedAsRunning() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"BG9","background_tasks":[{"id":"sh9","type":"shell","command":"x"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "BG9#bg:sh9" && $0.action == .update(tool: nil, detail: nil, reply: "x", replyAppend: false, toolComplete: false) })
     }
 }

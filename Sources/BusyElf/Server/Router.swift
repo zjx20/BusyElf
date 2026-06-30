@@ -68,41 +68,45 @@ struct Router {
 
     /// 把一条 Claude hook 原始 payload 翻成中立动作并落到 TaskStore。无 id 则忽略。
     private func routeClaude(body: Data) {
-        // translate 有状态(子任务输入关联),**每事件只调一次**;日志与落库共用同一结果,不可二次解析。
-        let hook = ClaudeHookEvent.translate(body)
-        // 调试插桩(仅 BUSYELF_DEBUG=1):打印每条 hook 的原始 body + 解析出的中立动作 + 折叠 id,
-        // 看清"事件流 → 动作"映射。NSLog 自带毫秒时间戳;生产环境(debugEnabled=false)一行不打。
+        // translate 有状态(子任务输入关联 + 后台任务差集),**每事件只调一次**;日志与落库共用同一结果,不可二次解析。
+        // 多数事件翻成一个动作;父会话 Stop/SessionEnd 可能翻成多个(父 done + 各后台子项 update/done)。
+        let hooks = ClaudeHookEvent.translate(body)
+        // 调试插桩(仅 BUSYELF_DEBUG=1):打印原始 body + 解析出的动作序列(含折叠 id),看清"事件流 → 动作"映射。
+        // NSLog 自带毫秒时间戳;生产环境(debugEnabled=false)一行不打。
         if Self.debugEnabled {
             let raw = String(decoding: body, as: UTF8.self)
             let shown = raw.count > 1200 ? String(raw.prefix(1200)) + "…(\(raw.count)B)" : raw
-            if let hook {
-                NSLog("[busyelf hook] action=%@ id=%@ ← %@", String(describing: hook.action), hook.id ?? "nil", shown)
+            if hooks.isEmpty {
+                NSLog("[busyelf hook] action=NONE(非JSON对象或忽略) ← %@", shown)
             } else {
-                NSLog("[busyelf hook] action=PARSE_FAIL(非JSON对象) ← %@", shown)
+                let actions = hooks.map { "\(String(describing: $0.action))@\($0.id ?? "nil")" }.joined(separator: " | ")
+                NSLog("[busyelf hook] actions=[%@] ← %@", actions, shown)
             }
         }
-        guard let hook, let id = hook.id, !id.isEmpty else { return }
         let agent = ClaudeHookEvent.agentLabel
-        switch hook.action {
-        case .start(let prompt):
-            store.start(id: id, parentId: hook.parentId, name: hook.name,
-                        prompt: prompt, agent: agent, cwd: hook.cwd)
-        case .update(let tool, let detail, let reply, let replyAppend, let toolComplete, let toolFailed, let toolError):
-            store.update(id: id, parentId: hook.parentId, name: hook.name,
-                         tool: tool, detail: detail, reply: reply, replyAppend: replyAppend,
-                         toolComplete: toolComplete, toolFailed: toolFailed, toolError: toolError,
-                         agent: agent, cwd: hook.cwd)
-        case .wait(let message):
-            store.wait(id: id, message: message, parentId: hook.parentId,
-                       name: hook.name, agent: agent, cwd: hook.cwd)
-        case .done(let reply):
-            store.done(id: id, reply: reply)
-        case .fail(let kind, let detail, let reply):
-            store.fail(id: id, parentId: hook.parentId, name: hook.name,
-                       errorKind: kind, errorDetail: detail, reply: reply,
-                       agent: agent, cwd: hook.cwd)
-        case .ignore:
-            break
+        for hook in hooks {
+            guard let id = hook.id, !id.isEmpty else { continue }
+            switch hook.action {
+            case .start(let prompt):
+                store.start(id: id, parentId: hook.parentId, name: hook.name,
+                            prompt: prompt, agent: agent, cwd: hook.cwd)
+            case .update(let tool, let detail, let reply, let replyAppend, let toolComplete, let toolFailed, let toolError):
+                store.update(id: id, parentId: hook.parentId, name: hook.name,
+                             tool: tool, detail: detail, reply: reply, replyAppend: replyAppend,
+                             toolComplete: toolComplete, toolFailed: toolFailed, toolError: toolError,
+                             agent: agent, cwd: hook.cwd)
+            case .wait(let message):
+                store.wait(id: id, message: message, parentId: hook.parentId,
+                           name: hook.name, agent: agent, cwd: hook.cwd)
+            case .done(let reply):
+                store.done(id: id, reply: reply)
+            case .fail(let kind, let detail, let reply):
+                store.fail(id: id, parentId: hook.parentId, name: hook.name,
+                           errorKind: kind, errorDetail: detail, reply: reply,
+                           agent: agent, cwd: hook.cwd)
+            case .ignore:
+                break
+            }
         }
     }
 

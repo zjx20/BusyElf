@@ -228,4 +228,45 @@ final class TaskStoreTests: XCTestCase {
                    errorDetail: nil, reply: nil, agent: nil, cwd: nil)
         wait(for: [exp], timeout: 2)
     }
+
+    // MARK: - 父保留闸(有在跑子任务的父,即使已终态也不清除)
+
+    /// 父 turn 结束置 done,但后台子项仍在跑 → ① 休眠仍阻止(子在跑);② 关 popover 不清除父(否则子变孤儿)。
+    func testParentDoneWithWorkingChildIsRetainedAndBlocks() {
+        start("PB")                                         // 父
+        start("PB#bg:sh", parentId: "PB", name: "shell")    // 后台子项在跑
+        store.done(id: "PB", reply: "turn done")            // 父 turn 结束
+        XCTAssertEqual(s("PB")?.status, .done)
+        XCTAssertEqual(s("PB#bg:sh")?.status, .working)
+        XCTAssertTrue(blocking)                              // 子在跑 → 仍阻止休眠(核心:不漏挡)
+        store.markTerminalSeen()                             // 打开 popover(父 done 标 seen)
+        store.purgeSeenTerminal()                            // 关闭 popover
+        XCTAssertNotNil(s("PB"))                             // 父被保留(有在跑子任务),不变孤儿
+        XCTAssertNotNil(s("PB#bg:sh"))
+    }
+
+    /// 后台子项完成后,父子在下次 purge 一起清除(子全终结 → 父不再受保护)。
+    func testParentClearedAfterChildDone() {
+        start("PC")
+        start("PC#bg:sh", parentId: "PC", name: "shell")
+        store.done(id: "PC", reply: nil)
+        store.done(id: "PC#bg:sh", reply: nil)              // 子(后台进程)也结束
+        XCTAssertFalse(blocking)                             // 都终态 → 放行休眠
+        store.markTerminalSeen()
+        store.purgeSeenTerminal()
+        XCTAssertNil(s("PC"))                                // 子全终结 → 父可清
+        XCTAssertNil(s("PC#bg:sh"))
+    }
+
+    /// 等待中(waiting)的子任务同样保护父不被清(非终态即保护)。
+    func testParentRetainedWhileChildWaiting() {
+        start("PW")
+        start("PW#a1", parentId: "PW", name: "Explore")
+        store.wait(id: "PW#a1", message: "授权?", parentId: "PW", name: "Explore", agent: nil, cwd: nil)
+        store.done(id: "PW", reply: nil)
+        store.markTerminalSeen()
+        store.purgeSeenTerminal()
+        XCTAssertNotNil(s("PW"))                             // 子 waiting(非终态)→ 父保留
+        XCTAssertEqual(s("PW#a1")?.status, .waiting)
+    }
 }

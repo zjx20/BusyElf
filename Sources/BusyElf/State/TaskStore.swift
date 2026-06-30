@@ -215,11 +215,14 @@ final class TaskStore {
     }
 
     /// popover 关闭:清理掉已 seen 的终态项 → 下次打开它们不再显示。
+    /// **但有在跑子任务的父任务不清**(见 [parentsWithLiveChildrenLocked]):父 turn 结束置 done 后,
+    /// 若其后台子项(subagent / shell 等)仍在干活,清掉父会让子变孤儿、UI 错乱。保留到子全部终结。
     func purgeSeenTerminal() {
         queue.async {
+            let protected = self.parentsWithLiveChildrenLocked()
             let before = self.sessions.count
             for id in Array(self.sessions.keys) {
-                if let s = self.sessions[id], s.isTerminal, s.seen {
+                if let s = self.sessions[id], s.isTerminal, s.seen, !protected.contains(id) {
                     self.sessions.removeValue(forKey: id)
                 }
             }
@@ -364,15 +367,29 @@ final class TaskStore {
         timer.resume()
     }
 
-    /// 兜底:孤儿子任务降级 + 终态项 TTL / 数量上限。在串行队列上调用。
+    /// 仍有"非终态(working/waiting)子任务"的父任务 id 集合。这些父即使已 done/failed 也**不应被清除**:
+    /// 否则在跑的子任务会变孤儿、UI 错乱(父 turn 结束但其后台子代理 / shell 等仍在干活,是正常稳态)。
+    /// 覆盖两类后台子项:subagent(`session#agentId`)与 background_tasks 折叠的 shell 等(`session#bg:taskId`)。
+    /// 在串行队列上调用。
+    private func parentsWithLiveChildrenLocked() -> Set<String> {
+        var set = Set<String>()
+        for s in sessions.values where !s.isTerminal {
+            if let p = s.parentId { set.insert(p) }
+        }
+        return set
+    }
+
+    /// 兜底:孤儿子任务降级 + 疑似已断兜底移除 + 终态项 TTL / 数量上限。在串行队列上调用。
     private func pruneLocked() {
         let now = Date()
 
-        // 孤儿子任务降级:父已不在 / 已终态,且子久无进展 → 降为 done,
-        // 否则子卡在 working 会永久阻止休眠。
+        // 孤儿子任务降级:父**已不在**(被显式移除 / 兜底清掉)且子久无进展 → 降为 done,否则孤儿子长期显示 working。
+        // 注意:父"已终态但仍保留"(父 turn 结束、子仍在跑)是**正常稳态**(见 parentsWithLiveChildrenLocked),
+        // **不**在此降级——那会把仍在跑的后台子项误判完成、提前放行休眠。此类子项:休眠由看门狗(isStalled)兜底,
+        // 完成由 SubagentStop / background_tasks 差集判定。
         for id in Array(sessions.keys) {
             guard var s = sessions[id], s.status == .working, let pid = s.parentId else { continue }
-            let parentGone = sessions[pid] == nil || sessions[pid]?.isTerminal == true
+            let parentGone = sessions[pid] == nil
             if parentGone, s.sinceLastSeen(asOf: now) > Self.orphanGraceSeconds {
                 s.status = .done
                 s.endedAt = now
@@ -381,11 +398,11 @@ final class TaskStore {
             }
         }
 
-        // 疑似已断的顶层 working 任务超久无活动 → 兜底移除(级联子任务)。
+        // 疑似已断的 working 任务超久无活动 → 兜底移除(顶层连带级联其子任务;后台子项亦在此清,防长跑无界堆积)。
         // 它早已不阻止休眠(派生 stalled 排除),这里只为防 working 项无界堆积;远长于无活动阈值,
         // 用户有充足时间在 popover 看到"可能已断"。不降级为 done/failed,避免谎报完成或误触失败横幅。
         for id in Array(sessions.keys) {
-            guard let s = sessions[id], s.status == .working, s.parentId == nil else { continue }
+            guard let s = sessions[id], s.status == .working else { continue }
             if s.sinceLastSeen(asOf: now) > Self.stalledReapAfter {
                 sessions.removeValue(forKey: id)
                 for childId in sessions.values.filter({ $0.parentId == id }).map({ $0.id }) {
@@ -394,16 +411,19 @@ final class TaskStore {
             }
         }
 
-        // 终态项超龄移除(无论是否 seen)。
+        // 有在跑子任务的父,即使已终态也不清(否则子变孤儿)。在上面 working 项变更之后计算,反映最新存活情况。
+        let protected = parentsWithLiveChildrenLocked()
+
+        // 终态项超龄移除(无论是否 seen);受保护的父除外。
         for id in Array(sessions.keys) {
-            if let s = sessions[id], s.isTerminal,
+            if let s = sessions[id], s.isTerminal, !protected.contains(id),
                let e = s.endedAt, now.timeIntervalSince(e) > Self.maxTerminalAge {
                 sessions.removeValue(forKey: id)
             }
         }
 
-        // 终态项数硬上限:超出按 endedAt 删最旧。
-        let terminals = sessions.values.filter { $0.isTerminal }
+        // 终态项数硬上限:超出按 endedAt 删最旧;受保护的父不参与淘汰。
+        let terminals = sessions.values.filter { $0.isTerminal && !protected.contains($0.id) }
         if terminals.count > Self.maxTerminalCount {
             let overflow = terminals
                 .sorted { ($0.endedAt ?? $0.startedAt) < ($1.endedAt ?? $1.startedAt) }

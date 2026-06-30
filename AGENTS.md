@@ -65,7 +65,11 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 
 **子任务(subagent)**:把子 id 折进 `id`(`"父id#子id"`)+ `parentId` 表达;有 `parentId` 即子任务。折叠只发生在适配器边界,核心层无感。
 
-**Claude 适配映射**(`ClaudeHookEvent.swift`):`UserPromptSubmit`→start、`SubagentStart`→start(子)、`PreToolUse`/`PostToolUse`→update(✓)、`PostToolUseFailure`→update(✗,工具失败是常态非中断,仍 working)、`MessageDisplay`→update(reply)、`Notification`(读 `notification_type`:permission→wait / idle→忽略)、`Stop`/`SubagentStop`/`SessionEnd`→done、`StopFailure`→fail。subagent 靠 `agent_id`/`agent_type`,**session_id 与父相同**。
+**后台任务(background_tasks,turn 结束但活儿没完)**:agent 用 `run_in_background` 起的 shell 等后台进程会让父 turn 结束(`Stop`)、进程却仍在跑。后台进程**结束时 Claude Code 不发任何 hook**(实测),唯一信号是 `Stop`/`SessionEnd` 输入里的 `background_tasks[]`(v2.1.145+,每条 `id/type/status/command`)。适配器在 `Stop` 把每条仍 `running` 的后台任务折成后台子项(`"父id#bg:taskId"`,`parentId`=父,working → 持续阻止休眠),父照常 `done`;**完成靠差集**——某后台任务"上个 Stop 在、这个 Stop 没了"即判完成→子项 `done`(`SessionEnd` 视为空快照→收尾全部)。`task.id` 跨 turn 稳定(实测=后台句柄)。**`type:"subagent"` 跳过**:后台子代理由 `SubagentStart`/`SubagentStop` 事件精确跟踪(`id`=`agent_id`,折成 `父id#agent_id`),在此一并折会重复建项。一个 `Stop` 因此可能翻成**多个**中立动作(父 done + 各后台子项 update/done),故 `translate` 返回数组、`Router.routeClaude` 遍历分发。这些都是普通 update/done(带 parentId),中立 `/v1/task/*` 同样能表达,parity 不破。
+
+**父任务保留(有在跑子任务不清父)**:父已终态但**仍有非终态子任务**(后台子项 / subagent 在跑)时,清理逻辑(`purgeSeenTerminal` / `pruneLocked` 的 TTL & 数量上限)**跳过该父**(`parentsWithLiveChildrenLocked`),否则在跑的子任务变孤儿、UI 错乱;子全终结后父子一起清。子任务休眠由 `hasBlockingWorking`(含子)+ 看门狗 `isStalled` 兜底;孤儿降级只在"父**已不在**"(非"父终态")时触发,以免把仍在跑的后台子项误判完成而提前放行休眠。
+
+**Claude 适配映射**(`ClaudeHookEvent.swift`):`UserPromptSubmit`→start、`SubagentStart`→start(子)、`PreToolUse`/`PostToolUse`→update(✓)、`PostToolUseFailure`→update(✗,工具失败是常态非中断,仍 working)、`MessageDisplay`→update(reply)、`Notification`(读 `notification_type`:permission→wait / idle→忽略)、`Stop`→done **+ `background_tasks` 差集折成后台子项 update/done**、`SubagentStop`→done(子)、`SessionEnd`→done **+ 收尾后台子项**、`StopFailure`→fail。subagent 靠 `agent_id`/`agent_type`,**session_id 与父相同**;后台任务靠 `background_tasks`(已剔除 subagent)。
 
 ---
 
@@ -107,6 +111,19 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 - **改 UI**:复用 `UI.label/DotView/HoverRow/ClickableRow`(`UI/AppKitHelpers.swift`)、`Format.duration/ago`。
 
 每加一处行为,**在两个测试脚本里补断言**(E2E 断 `/debug/state`,单元断内部逻辑)。
+
+---
+
+## 调试技巧:捕获 Claude Code 真实 hook 事件(比读日志强,免重建 BusyElf)
+
+要搞清"某场景下 Claude Code 到底发了哪些 hook、字段长啥样"(如 `Stop.background_tasks` 的真实形态、新字段、id 是否跨 turn 稳定),**别凭文档/记忆猜,也别给 BusyElf 加日志重新构建**。最快的是临时旁挂一个捕获服务,把原始 hook body 全量落盘:
+
+1. **起本地捕获服务** `scripts/capture-hooks.py`(已固化备用):每个 POST 的 body 带时间戳追加进 JSONL,**立即回 `200` 空体**(行为同 BusyElf,绝不干扰 Claude 流程)。用 `nohup python3 scripts/capture-hooks.py &` 独立起(不占 Claude 后台任务槽,这样 `background_tasks` 里只剩你要观测的目标);默认端口 `17899`、日志 `$TMPDIR/busyelf-hook-capture.jsonl`(端口/日志可经 argv 或 `BUSYELF_CAPTURE_PORT`/`BUSYELF_CAPTURE_LOG` 覆盖;`--logpath` 打印日志路径供 `cat`/`jq`)。
+2. **临时加一条 capture hook**:`cp` 备份当前会话的 `settings.json`(项目级 `.claude/settings.local.json` 最稳、个人、gitignored),然后给关心的事件**追加第二条** `{"type":"http","url":"http://127.0.0.1:<capport>/…"}`——**只加,绝不动 BusyElf 那条**。Claude Code 会跑完所有 hook,于是你拿到一份副本。settings.json **改动会被热加载**(文件监视器),当前会话即生效,无需重启 Claude Code。
+3. **触发场景并读取**:正常干活触发事件;`Stop` 在你**结束本轮**那一刻才发,所以要跨 turn 读取。多轮编排不靠外部定时器——**每个 `run_in_background` 进程/子代理完成都会独立把 agent 唤醒起新 turn**(即便另有后台进程仍在跑),拿它当"节拍器":起个短 `sleep` 后台进程,结束本轮 → 它完成时把你唤回读捕获。
+4. **务必清理**:`cp` 备份覆盖回 `settings.json`(逐字节还原,`diff` 验证)、`pkill` 捕获服务、`kill` 测试用后台 sleep。改的是用户 Claude Code 配置,收尾要干净。
+
+`background_tasks`、`task.id` 跨 turn 稳定、五处 id 同源等结论都是这么实测出来的(对应记忆 `busyelf-bg-process-sleep`)。这套方法对"加新 hook 适配/核对字段名"都通用。
 
 ---
 
