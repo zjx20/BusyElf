@@ -29,4 +29,6 @@ xattr -dr com.apple.quarantine /Applications/BusyElf.app
 
 ## 接入 Claude Code / 其它 agent
 
-装好后菜单栏会出现 ⚡。按 [docs/SETUP.md](../blob/main/docs/SETUP.md) 把 hooks 写进 `~/.claude/settings.json`(推荐内建 `/claude/hooks`,零依赖),agent 一跑长任务,BusyElf 就会阻止系统休眠,任务结束自动恢复。
+装好后菜单栏会出现 ⚡。点它打开面板,点右上角的 **⋯** → 选 **「接入 agent…」**,在对应 harness 那行点 **复制提示词**(端口已自动填好,你不用管是多少),把它粘进你的 agent 对话即可——agent 会读懂提示词、自己把 hooks 幂等合并进配置文件(对 Claude Code 是 `~/.claude/settings.json`,会先备份、不动你已有的配置)。配好后让 agent 随便跑个长任务,⚡ 应当点亮、计数 +1,任务结束自动归零并放行休眠。
+
+> 整个过程 BusyElf 不碰你的任何文件,是你自己的 agent 在你眼皮底下完成配置。不想用接入向导,也可照 [docs/SETUP.md](https://github.com/zjx20/BusyElf/blob/main/docs/SETUP.md) 手动把 hooks 写进配置文件,效果一样。
