@@ -171,6 +171,29 @@ final class TaskStore {
         }
     }
 
+    /// keepAlive:**纯保活**——把一个仍在 `working` 的任务的 `lastSeen` 刷到现在,顺延看门狗的"疑似已断"截止点。
+    /// 不建项、不改 status、不碰其它字段;**不存在或非 `working` 则忽略**(guard)。这条 guard 是安全核心:
+    /// 保活的输入来自 at-least-once、可能陈旧的 `background_tasks` 快照,guard 保证它绝不复活终态(哪怕快照把
+    /// 一个已 done 的后台进程仍标 running)、也绝不凭空建项。
+    /// 用途:适配器在 `Stop`/`SubagentStop` 见某后台进程仍列在 `background_tasks` 里 = 它还活着的实证 → 据此续期,
+    /// 防它在父任务长时间无 turn(无其它动词刷新)时被看门狗按无活动阈值误判已断、提前放行休眠。
+    /// reconcile 为按新 `lastSeen` 重排看门狗截止点(派生量变了,必须重算)。
+    ///
+    /// **刻意 un-stall 一个已 stalled 的 working 项**:`stalled` 是派生量(status 仍是 `working`),刷新 `lastSeen`
+    /// 即恢复阻止休眠——这与看门狗"完全可逆"的既有契约一致(见 docs/PROTOCOL.md、DESIGN.md:任一动词刷新 lastSeen
+    /// 都恢复阻止),`update`/`wait` 等同样如此。真正止血的不是"限制 un-stall",而是**信号本身会消失**:后台进程真
+    /// 结束时 Claude 把它从 `background_tasks` 移除 → keepAlive 不再命中 → 看门狗如常放行、`stalledReapAfter` 如常兜底。
+    /// **绝不能**为防"陈旧快照被无限重放"而给这里加一个"免疫 keepAlive 的硬删上限":那会在 6h 时误删一个**真在跑**
+    /// 的长任务(父仍周期性 turn 列出它)→ 漏挡休眠,比它想防的病态重放更糟(且那病态对既有 update-fold 也同样成立)。
+    func keepAlive(id: String) {
+        queue.async {
+            guard var s = self.sessions[id], s.status == .working else { return }
+            s.lastSeen = Date()
+            self.sessions[id] = s
+            self.reconcile()
+        }
+    }
+
     /// remove:真正移除(用户手动 ×)。级联移除其子任务;幂等。
     func remove(id: String) {
         queue.async {

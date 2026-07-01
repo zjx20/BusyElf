@@ -69,7 +69,7 @@ struct Router {
     /// 把一条 Claude hook 原始 payload 翻成中立动作并落到 TaskStore。无 id 则忽略。
     private func routeClaude(body: Data) {
         // translate 有状态(子任务输入关联 + 后台任务差集),**每事件只调一次**;日志与落库共用同一结果,不可二次解析。
-        // 多数事件翻成一个动作;父会话 Stop/SessionEnd 可能翻成多个(父 done + 各后台子项 update/done)。
+        // 多数事件翻成一个动作;父会话 Stop/SessionEnd 可能翻成多个(父 done + 各后台子项 update/done + 在跑后台条目 keepAlive)。
         let hooks = ClaudeHookEvent.translate(body)
         // 调试插桩(仅 BUSYELF_DEBUG=1):打印原始 body + 解析出的动作序列(含折叠 id),看清"事件流 → 动作"映射。
         // NSLog 自带毫秒时间戳;生产环境(debugEnabled=false)一行不打。
@@ -106,6 +106,8 @@ struct Router {
                            agent: agent, cwd: hook.cwd)
             case .enrich(let prompt):
                 store.enrichPrompt(id: id, prompt: prompt)
+            case .keepAlive:
+                store.keepAlive(id: id)
             case .ignore:
                 break
             }

@@ -21,6 +21,8 @@ import Foundation
 ///   - `Notification`     → wait / ignore  (按 notification_type:permission 才 wait,idle 忽略)
 ///   - `PermissionRequest`→ wait    (权限弹窗出现 = 等用户批准工具;真实弹窗的可靠信号,IDE/交互模式不发 Notification)
 ///   - `Stop`/`SessionEnd`/`SubagentStop` → done  (turn / 会话 / 子任务正常结束)
+///                          + **保活**:`Stop`/`SubagentStop` 的 `background_tasks` 里仍在运行的后台条目(不分 type)
+///                            → keepAlive(刷新 `lastSeen`),防它们在父长时间无 turn 时被看门狗误放行休眠。SessionEnd 除外(drain)。
 ///   - `StopFailure`      → fail    (turn 因 API 错误结束:error / error_details / 错误原文)
 ///   - 其余事件           → ignore  (安全无副作用,容忍用户多配了 hook)
 ///
@@ -42,6 +44,10 @@ struct ClaudeHookEvent {
         /// 纯展示富化:给已存在的子任务补 prompt(从 background_tasks 的 subagent description 收割)。
         /// 不建项、不改 status、不碰休眠——仅在关联器漏接时兜底点亮"它在干什么"那行。
         case enrich(prompt: String)
+        /// 纯保活:某后台子项仍列在 `background_tasks` 里(= 还活着)→ 刷新其 `lastSeen`,顺延看门狗截止点。
+        /// 不建项、不改 status(下游 `store.keepAlive` 只对已存在的 `working` 项生效,绝不复活终态)——
+        /// 防它在父任务长时间无 turn 时被看门狗误判"疑似已断"而提前放行休眠。
+        case keepAlive
         case ignore
     }
 
@@ -68,6 +74,11 @@ struct ClaudeHookEvent {
     /// 键为折叠 id(`session#agentId`,与 SubagentStart 一致),值为 description。
     /// 用于**兜底富化**子代理 prompt(关联器漏接时);纯展示,与 `backgroundTasks`(折叠/差集,已剔除 subagent)互补。
     var subagentDescriptions: [String: String]? = nil
+    /// 仅 Stop/SubagentStop 携带:background_tasks 里**所有仍在运行**条目(不分 type)的折叠 id,用于**保活**
+    /// (刷新 `lastSeen`,续期防看门狗误放行)。与 `backgroundTasks`(剔 subagent,做折叠/差集)、`subagentDescriptions`
+    /// (取 subagent 的 desc)正交:保活只回答"还活着吗",覆盖 shell/subagent/workflow 等所有 type,不建项/不改状态。
+    /// SessionEnd 不设(会话收尾 = drain,不给任何后台进程续期)。
+    var keepAliveIds: [String]? = nil
 
     /// 写进任务的来源标签,用于 UI 展示/分组。
     static let agentLabel = "claude-code"
@@ -110,6 +121,7 @@ struct ClaudeHookEvent {
         let action: Action
         var bg: [BgTask]? = nil   // 仅父会话 Stop/SessionEnd 设置:用于后台任务差集
         var subDescs: [String: String]? = nil   // 从 background_tasks 收割的 subagent description(折叠 id→desc)
+        var keepAlive: [String]? = nil   // 仅 Stop/SubagentStop 设置:仍在运行的后台条目折叠 id(保活刷新 lastSeen)
         switch event {
         case "UserPromptSubmit":
             // `prompt` 为用户提交的文本(权威 hooks 文档确认字段名为 `prompt`)。
@@ -190,6 +202,7 @@ struct ClaudeHookEvent {
             action = .done(reply: Self.string(dict, "last_assistant_message"))
             bg = Self.parseBackgroundTasks(dict)   // key 不存在 → nil(老版本/注册表不可达,不做差集)
             subDescs = Self.parseSubagentDescriptions(dict, session: session)   // 兜底富化:收割在跑子代理的 description
+            keepAlive = Self.parseKeepAliveIds(dict, session: session)   // 保活:仍在跑的后台条目(不分 type)刷新 lastSeen
 
         case "SessionEnd":
             // 整个会话结束:无 background_tasks 字段。强制 bg=[](空快照)→ translate 差集会把该会话所有后台子项收尾。
@@ -203,6 +216,9 @@ struct ClaudeHookEvent {
             // 但**收割** background_tasks 里本子代理自身的 description(实测常规子代理的 SubagentStop 会带)→ 兜底补 prompt。
             action = .done(reply: Self.string(dict, "last_assistant_message"))
             subDescs = Self.parseSubagentDescriptions(dict, session: session)
+            // 保活:SubagentStop 不做 background_tasks 差集(见上),但它仍是"父会话还活着"的信号 →
+            // 给此刻仍列在 background_tasks 里的后台进程(含其它 subagent / shell)续期,防父长时间无 turn 时被看门狗误放行。
+            keepAlive = Self.parseKeepAliveIds(dict, session: session)
 
         case "StopFailure":
             // turn 因 API 错误结束。error=类型;last_assistant_message 此处为错误原文。
@@ -216,7 +232,7 @@ struct ClaudeHookEvent {
         }
 
         return ClaudeHookEvent(id: id, parentId: parentId, name: name, cwd: cwd, action: action,
-                               backgroundTasks: bg, subagentDescriptions: subDescs)
+                               backgroundTasks: bg, subagentDescriptions: subDescs, keepAliveIds: keepAlive)
     }
 
     /// 在纯 [parse] 之上叠加"子任务输入"关联(有状态)。
@@ -263,6 +279,17 @@ struct ClaudeHookEvent {
             for (cid, desc) in descs {
                 out.append(ClaudeHookEvent(id: cid, parentId: nil, name: nil, cwd: nil,
                                            action: .enrich(prompt: desc)))
+            }
+        }
+        // 保活:background_tasks 里仍在运行的后台进程(所有 type)= 活着的实证 → 刷新其 lastSeen,
+        // 防看门狗在无其它事件时误判"疑似已断"提前放行休眠。纯保活(store.keepAlive 只对已存在的 working 项生效,
+        // 不建项/不改状态/不复活终态)。Stop 上 shell 子项已被 backgroundActions 的 update 折叠刷新过,这里再保活是
+        // 幂等冗余;真正补上的是 subagent 子项(Stop 此前只 enrich 不刷 lastSeen)与整个 SubagentStop 路径(此前完全不刷)。
+        // 冗余无害:keepAlive 仅 refresh 已存在的 working 项。刚 SubagentStop 的子代理自身即便还列在快照里,也因其 done
+        // 动作在此之前入队(串行队列先执行)、guard status==working 落空而被跳过 → 绝不复活。
+        if let ids = e.keepAliveIds {
+            for kid in ids {
+                out.append(ClaudeHookEvent(id: kid, parentId: nil, name: nil, cwd: nil, action: .keepAlive))
             }
         }
         return out
@@ -411,6 +438,25 @@ struct ClaudeHookEvent {
             map["\(session)#\(tid)"] = desc   // 折叠 id 与 SubagentStart 一致(子代理无 "bg:" 前缀)
         }
         return map.isEmpty ? nil : map
+    }
+
+    /// 从 background_tasks 取**所有仍在运行**条目的折叠 id(不分 type),用于保活(刷新 lastSeen)。
+    /// 折叠 id 与各自的建项路径严格一致:`type=="subagent"` → `session#agentId`(SubagentStart 那套),
+    /// 其余(shell/workflow/…)→ `session#bg:taskId`([childId] 那套)。剔除明确终态(只给活着的续期)。
+    /// 缺 background_tasks / 无 session → nil。与 [parseBackgroundTasks]/[parseSubagentDescriptions] 刻意分开:
+    /// 保活是"证明还活着"的正交关注点,覆盖所有 type,且绝不建项/改状态(下游 keepAlive 只 refresh 已存在的 working 项)。
+    private static func parseKeepAliveIds(_ dict: [String: Any], session: String?) -> [String]? {
+        guard let session, !session.isEmpty,
+              let arr = dict["background_tasks"] as? [[String: Any]] else { return nil }
+        var ids: [String] = []
+        for item in arr {
+            guard let tid = string(item, "id"), !tid.isEmpty else { continue }
+            if isTerminalBgStatus(string(item, "status")) { continue }
+            let fold = (string(item, "type") == "subagent") ? "\(session)#\(tid)"
+                                                            : childId(session: session, taskId: tid)
+            ids.append(fold)
+        }
+        return ids.isEmpty ? nil : ids
     }
 
     /// 取整型字段。缺失/类型不符 → nil。

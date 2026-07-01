@@ -340,6 +340,45 @@ expect "电源断言重新持有" ".assertionHeld" "true"
 expect "不再可疑" "$(fld W stalled)" "false"
 dbgto 900                                      # 还原默认,避免影响后续
 
+group "保活:Stop 见 subagent 后台仍在跑 → 刷新 lastSeen,阻止看门狗误放行休眠"
+reset
+dbgto 1                                         # 无活动超时 1s(仅测试)
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"KA","cwd":"/p","prompt":"起后台子代理"}'
+hook '{"hook_event_name":"SubagentStart","session_id":"KA","agent_id":"a1","agent_type":"Explore"}'
+expect "子代理创建为 working" "$(st 'KA#a1')" "working"
+# 父 Stop:子代理仍在 background_tasks(type=subagent,running)→ 父 done,子代理被 keepAlive 续期(仍 working)
+hook '{"hook_event_name":"Stop","session_id":"KA","last_assistant_message":"turn 结束,子代理还在后台跑","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"}]}'
+expect "父 turn → done" "$(st KA)" "done"
+expect "子代理仍 working(未折叠/未 done)" "$(st 'KA#a1')" "working"
+expect "★仅子代理在跑 → 仍阻止休眠" ".blocking" "true"
+sleep 1.6                                       # 越过 1s 阈值:无新事件 → 看门狗把子代理标 stalled 放行
+expect "无刷新 → 看门狗放行休眠" ".blocking" "false"
+expect "子代理标记可疑(stalled)" "$(fld 'KA#a1' stalled)" "true"
+expect "状态仍 working(未谎报终态)" "$(st 'KA#a1')" "working"
+# 再来一个父 Stop:a1 仍列在 background_tasks → keepAlive 刷新 lastSeen → 复活阻止(核心:保活生效)
+hook '{"hook_event_name":"Stop","session_id":"KA","last_assistant_message":"还在跑","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"}]}'
+expect "★Stop 保活刷新 lastSeen → 不再可疑" "$(fld 'KA#a1' stalled)" "false"
+expect "★Stop 保活 → 重新阻止休眠" ".blocking" "true"
+dbgto 900                                       # 还原默认
+
+group "保活:SubagentStop 见 shell 后台进程仍在跑 → 刷新 lastSeen(SubagentStop 也保活)"
+reset
+dbgto 1
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"KB","cwd":"/p","prompt":"起后台 shell"}'
+# 父 Stop 折出后台 shell 子项(working),父 done
+hook '{"hook_event_name":"Stop","session_id":"KB","last_assistant_message":"后台跑着","background_tasks":[{"id":"sh1","type":"shell","status":"running","command":"npm run build"}]}'
+expect "后台 shell 子项 working" "$(st 'KB#bg:sh1')" "working"
+expect "shell 在跑 → 阻止休眠" ".blocking" "true"
+sleep 1.6
+expect "无刷新 → 看门狗放行" ".blocking" "false"
+expect "shell 子项 stalled" "$(fld 'KB#bg:sh1' stalled)" "true"
+# 一个子代理结束(SubagentStop),shell 仍列在 background_tasks → keepAlive 刷新 shell 子项(不折叠/不差集)
+hook '{"hook_event_name":"SubagentStop","session_id":"KB","agent_id":"x1","last_assistant_message":"子代理完事","background_tasks":[{"id":"sh1","type":"shell","status":"running","command":"npm run build"}]}'
+expect "★SubagentStop 保活 shell 子项 → 不再可疑" "$(fld 'KB#bg:sh1' stalled)" "false"
+expect "★SubagentStop 保活 → 重新阻止休眠" ".blocking" "true"
+expect "shell 子项仍 working(SubagentStop 未误把它 done)" "$(st 'KB#bg:sh1')" "working"
+dbgto 900
+
 group "配置:自定义端口(BUSYELF_HTTP_PORT 首选端口生效)"
 CUSTOM_PORT=18931
 BUSYELF_DEBUG=1 BUSYELF_HTTP_PORT=$CUSTOM_PORT "$BIN" >/dev/null 2>&1 &

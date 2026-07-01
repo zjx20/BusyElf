@@ -337,4 +337,43 @@ final class ClaudeHookEventTests: XCTestCase {
         let out = translateAll(#"{"hook_event_name":"SubagentStop","session_id":"S","agent_id":"a1","last_assistant_message":"x","background_tasks":[{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"}]}"#)
         XCTAssertFalse(out.contains { if case .enrich = $0.action { return true } else { return false } })
     }
+
+    // MARK: - 保活(keepAlive:background_tasks 里仍在跑的后台条目 → 刷新 lastSeen,防看门狗误放行休眠)
+
+    /// Stop 里仍在跑的后台条目(shell + subagent,不分 type)→ 都产出 keepAlive。
+    /// shell 另有 update 折叠(冗余但幂等);subagent 子项此前只被 enrich、不刷 lastSeen,现在也保活(关键新增)。
+    func testStopEmitsKeepAliveForRunningBackgroundTasks() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"KA1","last_assistant_message":"ok","background_tasks":[{"id":"sh1","type":"shell","status":"running","command":"x"},{"id":"a1","type":"subagent","status":"running","agent_type":"Explore"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "KA1#bg:sh1" && $0.action == .keepAlive })
+        XCTAssertTrue(out.contains { $0.id == "KA1#a1" && $0.action == .keepAlive })   // 子代理折叠 id 无 bg: 前缀
+    }
+
+    /// SubagentStop 也保活:某子代理结束时,父会话 background_tasks 里仍在跑的其它后台条目(shell / 别的 subagent)
+    /// → 产出 keepAlive(此前 SubagentStop 完全不刷新它们,父长时间无 turn 时会被看门狗误放行)。且不折叠 / 不差集。
+    func testSubagentStopEmitsKeepAliveForOtherRunningBackgroundTasks() {
+        let out = translateAll(#"{"hook_event_name":"SubagentStop","session_id":"KA2","agent_id":"a1","last_assistant_message":"done","background_tasks":[{"id":"sh9","type":"shell","status":"running","command":"x"},{"id":"a2","type":"subagent","status":"running","agent_type":"Explore"}]}"#)
+        XCTAssertTrue(out.contains { $0.id == "KA2#bg:sh9" && $0.action == .keepAlive })
+        XCTAssertTrue(out.contains { $0.id == "KA2#a2" && $0.action == .keepAlive })
+        // SubagentStop 只保活,不把 shell 折成后台子项(update)、不做差集(done)。
+        XCTAssertFalse(out.contains { if case .update = $0.action { return $0.id == "KA2#bg:sh9" } else { return false } })
+    }
+
+    /// 明确终态(completed 等)的后台条目不保活(它已结束,不该续期挡休眠)。
+    func testKeepAliveSkipsTerminalBackgroundTasks() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"KA3","background_tasks":[{"id":"shC","type":"shell","status":"completed","command":"x"}]}"#)
+        XCTAssertFalse(out.contains { $0.action == .keepAlive })
+    }
+
+    /// SessionEnd 是收尾(drain),不保活(会话结束,不该给任何后台进程续期)。
+    func testSessionEndEmitsNoKeepAlive() {
+        _ = translateAll(#"{"hook_event_name":"Stop","session_id":"KA4","background_tasks":[{"id":"sh4","type":"shell","status":"running","command":"x"}]}"#)
+        let out = translateAll(#"{"hook_event_name":"SessionEnd","session_id":"KA4","reason":"exit"}"#)
+        XCTAssertFalse(out.contains { $0.action == .keepAlive })
+    }
+
+    /// 无 background_tasks 的普通 Stop 不产 keepAlive(单一父 done,不退化)。
+    func testStopWithoutBackgroundTasksNoKeepAlive() {
+        let out = translateAll(#"{"hook_event_name":"Stop","session_id":"KA5","last_assistant_message":"ok"}"#)
+        XCTAssertFalse(out.contains { $0.action == .keepAlive })
+    }
 }

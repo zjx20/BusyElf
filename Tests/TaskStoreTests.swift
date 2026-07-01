@@ -210,6 +210,42 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertFalse(blocking)                         // 不重新阻止休眠
     }
 
+    // MARK: - keepAlive(纯保活:刷新 working 项 lastSeen;不建项/不改状态/不复活终态/不动 waiting)
+
+    /// 保活刷新 working 项的 lastSeen(顺延看门狗截止点),status 不变、仍阻止休眠。
+    func testKeepAliveRefreshesWorkingLastSeen() {
+        start("KA")
+        let before = s("KA")!.lastSeen
+        store.keepAlive(id: "KA")
+        let after = s("KA")!.lastSeen
+        XCTAssertGreaterThanOrEqual(after, before)          // lastSeen 不回退(实际前移;顺延看门狗)
+        XCTAssertEqual(s("KA")?.status, .working)           // 不改状态
+        XCTAssertTrue(blocking)                              // 仍阻止休眠
+    }
+
+    /// 不存在的 id 不凭空建项(background_tasks 快照可能列出尚未建项的后台条目)。
+    func testKeepAliveIgnoresAbsent() {
+        store.keepAlive(id: "ghost")
+        XCTAssertNil(s("ghost"))
+    }
+
+    /// 已 done 的后台子项即便还被陈旧快照标 running,保活也**不复活**(guard status==working)。
+    func testKeepAliveDoesNotReviveTerminal() {
+        start("KT#bg:sh", parentId: "KT", name: "shell")
+        store.done(id: "KT#bg:sh", reply: nil)
+        store.keepAlive(id: "KT#bg:sh")
+        XCTAssertEqual(s("KT#bg:sh")?.status, .done)        // 不复活
+        XCTAssertFalse(blocking)                             // 不重新阻止休眠
+    }
+
+    /// waiting 的任务保活也不翻回 working(guard 只认 working;wait 语义不该被后台快照打断)。
+    func testKeepAliveDoesNotFlipWaiting() {
+        start("KW")
+        store.wait(id: "KW", message: "授权?", parentId: nil, name: nil, agent: nil, cwd: nil)
+        store.keepAlive(id: "KW")
+        XCTAssertEqual(s("KW")?.status, .waiting)
+    }
+
     // MARK: - seen 生命周期
 
     func testSeenLifecycle() {
