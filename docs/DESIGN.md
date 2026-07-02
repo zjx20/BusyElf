@@ -91,7 +91,7 @@ BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PRO
 | `POST /v1/task/update` | 任务更新 | `id`*、`tool?`、`toolInput?`、`reply?`、`replyAppend?`、`parentId?` | → **working**(终态/waiting 时复活接管) |
 | `POST /v1/task/wait`   | 等待用户输入 | `id`*、`message?` | → **waiting** |
 | `POST /v1/task/done`   | 任务完成 | `id`*、`reply?` | → **done**(留存提示,不阻止休眠) |
-| `POST /v1/task/fail`   | 任务失败 | `id`*、`errorKind?`、`errorDetail?` | → **failed**(红点提示) |
+| `POST /v1/task/fail`   | 任务失败 | `id`*、`errorKind?`、`errorDetail?` | → **failed**(红色提示) |
 | `POST /v1/task/remove` | 移除任务 | `id`* | 移除任务(级联子任务) |
 
 子任务把子 id 折进 `id`(`父#子`)+ `parentId` 表达。所有 agent 专属知识(字段名、事件语义)都下沉到适配器层;BusyElf 服务端永不 import 一个具体 agent 的概念。中立接口与 `/claude/hooks` 表现力对等。
@@ -105,7 +105,7 @@ BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PRO
 派生量:
 - **阻止休眠** = 存在任一 `working` 任务(终态不阻止)**且未"疑似已断"**(`now − lastSeen ≤ 无活动阈值`,默认 15min 可配;见 §6 看门狗)。
 - **需要关注**(橙) = 存在任一 `waiting` 任务。
-- **完成提示**(绿点+无活动时整只烤绿)= 存在任一未看过的**顶层** `done`(子任务完成静默,不点亮);**失败提示**(红点+整只烤红,优先)= 存在任一未看过的 `failed`(含子任务)。
+- **完成提示**(无 working 时整只烤绿)= 存在任一未看过的**顶层** `done`(子任务完成静默,不染绿);**失败提示**(整只烤红,优先压过一切)= 存在任一 `failed`(含子任务,看过后仍红直到清理/移除)。菜单栏只用整只闪电着色表达,不叠加右上角小圆点(决策见 `StatusItemController.decideVisual`)。
 
 动词 → 状态转移(活动态 working/waiting;终态 done/failed 留存展示,可被 update/start 复活):
 
@@ -115,10 +115,10 @@ BusyElf 只认识"任务",不认识任何具体 agent。详见 [PROTOCOL.md](PRO
 | `update` | **upsert** → working;复活 waiting/终态 | 既是"在干活"心跳,也是恢复信号。**upsert**:漏掉 start 也能接上(中途启动),**宁可多醒不可漏醒** |
 | `wait`   | **upsert** → waiting | 需用户处理。中立总是创建("见到请求就追踪") |
 | `done`   | 已存在 → done(failed 不被覆盖) | 正常完成,留存提示而非消失 |
-| `fail`   | **upsert** → failed(失败优先) | 异常停止,红点紧急提示 |
+| `fail`   | **upsert** → failed(失败优先) | 异常停止,红色紧急提示 |
 | `remove` | 移除(幂等,级联子任务) | 用户主动清理 |
 
-> 终态(done/failed)留在字典里供展示,**不阻止休眠**,靠 seen 生命周期清理:popover 打开标 seen(清角标)、关闭后 purge(下次打开消失),并有 TTL/数量上限兜底。
+> 终态(done/failed)留在字典里供展示,**不阻止休眠**,靠 seen 生命周期清理:popover 打开标 seen(完成绿回落,失败红继续保持)、关闭后 purge(下次打开消失,失败红随之消失),并有 TTL/数量上限兜底。
 > 对 Claude Code 的体现:`Stop`→done(完成提示)、`StopFailure`→fail(失败提示)、`SubagentStart/Stop`→子任务。permission vs idle 通知靠**读 `notification_type`** 区分(见下)。阻塞等用户的 `AskUserQuestion`/`ExitPlanMode` 不发 Notification,适配器在其 `PreToolUse` 阶段翻成 `wait`(否则任务会卡 working 误挡休眠)。**权限弹窗**(等用户批准工具)的真实信号是 `PermissionRequest`(IDE/交互模式实测,非 `Notification`),也翻成 `wait`。
 
 幂等设计的原因:事件投递是 at-least-once 且可能丢失。用集合成员而非 `+1/-1` 整数计数器——整数会漂移成负数或卡在正数从而**永久阻止休眠**,这是本应用绝不能有的 bug。
@@ -204,7 +204,7 @@ struct TaskSession: Identifiable {
 
 详见 [UX.md](UX.md)。要点:
 
-- **图标**:单一 `bolt.fill`,靠明暗/数字/着色变化(不换字形,避免菜单栏抖动)。N=0 半透明无数字;有 working 全亮 + 数字;有 waiting 着色 + 提示。
+- **图标**:单一 `bolt.fill`,靠**整只闪电着色**/明暗/数字变化(不换字形、不叠加小圆点,避免菜单栏抖动)。六档优先级高→低:不可达红 > 失败红 > 等待橙 > (无 working)完成绿 > 运行白 > 空闲灰。
 - **popover**:状态头("Blocking sleep · 2 working" / "Idle")+ 可滚动任务行 + 底部设置("保持屏幕唤醒" + "更多设置"折叠区[开机启动/网口/端口/超时] + "Quit")。
 - **提醒**:任务进入 waiting 时发系统横幅"🔔 <项目>:Claude 需要你处理"。
 - **强制结束**:`×` 单段行内确认,只移除不杀进程,活跃任务有警示。

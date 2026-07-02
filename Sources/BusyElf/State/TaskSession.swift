@@ -3,8 +3,8 @@ import Foundation
 enum TaskStatus {
     case working   // 在干活 → 阻止休眠
     case waiting   // 等用户 → 放行休眠,但需关注
-    case done      // 正常完成 → 放行休眠;绿点提示,看一次后清理
-    case failed    // 异常停止(API 错误)→ 放行休眠;红点紧急提示
+    case done      // 正常完成 → 放行休眠;绿色提示,看一次后清理
+    case failed    // 异常停止(API 错误)→ 放行休眠;红色紧急提示,清理前持续
 }
 
 /// 单个 agent 任务的展示 + 状态。值类型,真相源是 `TaskStore` 里的字典。

@@ -15,7 +15,7 @@ BusyElf 是一个**极致轻量的原生 macOS 菜单栏常驻 app**:有 AI agen
    - 宁可多醒不可漏醒:漏 `start` 也能靠 `update`/`wait`/`fail` 的 upsert 接管(中途启动)。丢了 `done`/`fail` 也由看门狗在无活动超时后放行休眠(可逆:任一动词刷新 `lastSeen` 即恢复阻止)。
 3. **agent 中立核心**。`TaskStore` / 协议核心**永不 import 任何特定 agent 的概念**。所有"懂 Claude 字段名/事件语义"的代码**只允许**待在 `Server/ClaudeHookEvent.swift` 一个文件里。新增其它 agent 适配也照此隔离。
 4. **`/claude/hooks` 永远回 `2xx + 空 body`**。BusyElf 是纯被动观察者:绝不向 agent 注入上下文、不阻止工具、不改流程。
-5. **菜单栏图标绝不替换字形**(`bolt.fill` 固定)。换字形会改宽度让菜单栏抖动。状态靠 着色 / 数字 / 透明度 / 右上角合成角标 传达。见 `UI/StatusItemController.swift`。
+5. **菜单栏图标绝不替换字形**(`bolt.fill` 固定)。换字形会改宽度让菜单栏抖动。状态靠 **整只闪电着色** / 数字 / 透明度 传达(**不叠加右上角小圆点**——闪电颜色本身即状态)。见 `UI/StatusItemController.swift`。
 6. **idle 0 CPU**。服务端事件驱动(`NWListener`,kqueue 阻塞);popover 的 1s ticker 仅在可见时运行。别引入轮询/常驻定时器。**看门狗例外但守此约束**:它的一次性 `DispatchSourceTimer` 只在有 `working` 任务时存在、精确调度到截止点,无 working 即取消——此时机器本就因阻止休眠而醒着,不是常驻轮询。
 7. **popover 紧凑**:每个 item 文本 ≤2-3 行、尾部 `...` 截断(`UI.label(truncates:)`)。不追求展示完整,有问题让用户回 agent 那边看。
 
@@ -55,13 +55,16 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 | `start`  | upsert→working;记 prompt / 子任务标签(name)/ parentId;新 turn 清旧回复 |
 | `update` | upsert→working,**复活终态/waiting**;刷新当前动作(tool 优先,退化 reply)与回复(`reply`+`replyAppend` replace/append) |
 | `wait`   | upsert→waiting(总是创建);放行休眠 + 点亮"需要关注" |
-| `done`   | 已存在→done(终态,不删;**顶层**留绿点提示,子任务完成静默);failed 不被覆盖 |
-| `fail`   | upsert→failed(失败优先;红点);记 errorKind/errorDetail |
+| `done`   | 已存在→done(终态,不删;**顶层**点亮绿闪电,子任务完成静默);failed 不被覆盖 |
+| `fail`   | upsert→failed(失败优先;红闪电);记 errorKind/errorDetail |
 | `remove` | 真正移除(级联子任务) |
 
-`status ∈ {working, waiting, done, failed}`。`working` 阻止休眠;`waiting/done/failed` 放行。终态留存展示,靠 **seen 生命周期**清理:打开 popover→`markTerminalSeen`(清角标),关闭→`purgeSeenTerminal`(下次打开消失);另有 TTL/数量上限兜底(`pruneLocked`)。
+`status ∈ {working, waiting, done, failed}`。`working` 阻止休眠;`waiting/done/failed` 放行。终态留存展示,靠 **seen 生命周期**清理:打开 popover→`markTerminalSeen`(清 unseen 提示),关闭→`purgeSeenTerminal`(下次打开消失);另有 TTL/数量上限兜底(`pruneLocked`)。
 
-**菜单栏完成提示(绿点/绿闪电)只由顶层任务点亮**:`hasUnseenDone` 计算时排除子任务(`!isSubtask`,见 `AppDelegate.refreshStatus` 与 `debugStateJSON`,两处判据须一致)——子任务(subagent/后台子项)完成**静默**,不通知、不亮绿点(它们是父任务内部步骤、数量多)。与失败"整只闪电烤红"统一 UX:未看顶层 done **且无任何活动任务时**整只闪电烤绿 + 右上角绿点;仍在 working/waiting 时只保留绿点、底图随忙碌态(避免"看着像全好了"误导休眠)。失败红优先级最高、任何时候整只烤红。见 `UI/StatusItemController.swift`。**已完成子任务列表封顶**(`maxDoneSubtaskCount=20`,`pruneLocked`):done 子任务超上限按 `endedAt` 删最旧,防多子代理的父完成后堆积;failed 子任务不在此静默删。
+**菜单栏 = 整只闪电的颜色**(不再叠加右上角小圆点;闪电颜色本身即状态,决策见 `StatusItemController.decideVisual`,纯函数、白盒可测)。**六档,优先级高→低**:① 服务不可达 → 红(半透明区分);② 有失败任务 → 红(看过后仍红,直到清理/移除);③ 有 waiting → 橙;④ 有未看**顶层**完成 **且无任何 working** → 绿;⑤ 有 working → 白(template 满亮,随菜单栏明暗黑/白);⑥ 完全空闲 → 灰(template 半透明)。三色(绿<橙<红)优先级依次递增,压过白/灰。
+- **完成绿只由顶层任务点亮**:`hasUnseenDone` 计算时排除子任务(`!isSubtask`,见 `AppDelegate.refreshStatus` 与 `debugStateJSON`,两处判据须一致)——子任务(subagent/后台子项)完成**静默**(它们是父任务内部步骤、数量多)。
+- **绿有"无 working"门槛**:顶层已完成但仍有任务在跑(子任务/后台进程)时**不染绿**,退化为运行白——避免"看着像全好了"误导休眠(红没有此门槛:失败即使还在干活也照染,失败是警报不暗示"可休眠")。全部跑完那一刻才整只变绿。
+- **已完成子任务列表封顶**(`maxDoneSubtaskCount=20`,`pruneLocked`):done 子任务超上限按 `endedAt` 删最旧,防多子代理的父完成后堆积;failed 子任务不在此静默删。
 
 **看门狗(派生 stalled,不加第 5 个状态)**:`working` 任务 `now − lastSeen > inactivityTimeout`(默认 15min,可配)→ 派生为"疑似已断",`hasBlockingWorking` 把它排除 → **放行休眠**。状态仍是 `working`(不谎报 done/failed、不弹横幅),UI 标灰 + "可能已断";任一动词刷新 `lastSeen` 即自动恢复阻塞。靠 `reconcile` 里一次性 timer 精确到截止点重算;超久(默认 6h)仍无活动则在 `pruneLocked` 兜底移除。
 
@@ -144,7 +147,7 @@ scripts/test-busyelf.sh     # 端到端:自启实例 → 打真实端点 → 断
 
 - 注释用**中文**,与现有风格一致;命名/缩进/惯用法贴合周边代码。
 - **发布**走免开发者账号的 ad-hoc 路线(`scripts/ci-package.sh` + `.github/workflows/release.yml`):矩阵 `arm64+x86_64`、各出 zip/dmg、单 release job 汇总(`docs/BUILD.md`)。`ci-package.sh` 本地可复现一条腿。用户需一次性放行 Gatekeeper(右键打开在 Sequoia/Tahoe 已失效)。升级到 Developer ID 签名+公证见 BUILD.md。图标:源 `design/AppIcon.svg` → `scripts/make-icon.sh` → `Resources/AppIcon.icns`(`CFBundleIconFile` 引用)。
-- **端口黏住(sticky)**:首启探测(首选 `17872` → 候选 `17873/74/75` → 实在没有就 `port 0` 让系统分配),**绑成功后把实际端口持久化钉死**(`AppConfig.persistBoundPort`/`isPortPinned`,键 `portPinned`);此后每次只绑这个端口、**冲突即报错不漂移**(`LoopbackServer.failHard` → `onReachabilityChange(false)` → 菜单栏红角标半透明 + popover 顶部横幅 [重试]/[改端口])。`.ready` 必须从 `listener.port` 取真实端口(`port 0` 退化时尤甚)。这样适配器里写死的端口长期稳定有效。`defaults write elf.busyelf httpPort N` 或面板改端口=重新钉死(需重新复制接入指令)。**调试模式(`BUSYELF_DEBUG=1`)与 env 覆盖(`BUSYELF_HTTP_PORT`)都不持久化、且 debug 忽略已钉死端口**——测试与用户真实 defaults 互不污染。
+- **端口黏住(sticky)**:首启探测(首选 `17872` → 候选 `17873/74/75` → 实在没有就 `port 0` 让系统分配),**绑成功后把实际端口持久化钉死**(`AppConfig.persistBoundPort`/`isPortPinned`,键 `portPinned`);此后每次只绑这个端口、**冲突即报错不漂移**(`LoopbackServer.failHard` → `onReachabilityChange(false)` → 菜单栏整只闪电染红半透明 + popover 顶部横幅 [重试]/[改端口])。`.ready` 必须从 `listener.port` 取真实端口(`port 0` 退化时尤甚)。这样适配器里写死的端口长期稳定有效。`defaults write elf.busyelf httpPort N` 或面板改端口=重新钉死(需重新复制接入指令)。**调试模式(`BUSYELF_DEBUG=1`)与 env 覆盖(`BUSYELF_HTTP_PORT`)都不持久化、且 debug 忽略已钉死端口**——测试与用户真实 defaults 互不污染。
 - **onboarding(接入提示词)**:popover ⋯ →「接入 agent…」弹 `NSAlert`,每条配方一行(标签 + 复制按钮),`AppDelegate` 注入 `setupRecipesProvider`。`ClaudeHookEvent.installPrompt(port:)` 出 Claude 专属版(原生 `type:"http"` hooks,端口现取);`GenericSetupPrompt.installPrompt(port:)` 出中立 `/v1/task/*` 版(无 Claude 字样)。BusyElf 不碰用户文件,由用户自己的 agent 幂等合并进 `settings.json`。加新 harness=数组里加一条配方。
 - 默认仅 loopback;右键菜单可切「监听所有网口 (0.0.0.0)」(`AppConfig.listenOnAllInterfaces` + `server.restart()`),无鉴权,仅可信网络用。
 - 仅 loopback 可达、**无鉴权**(纯本机同用户场景,刻意从简)。

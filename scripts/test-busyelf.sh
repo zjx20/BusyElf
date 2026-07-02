@@ -160,35 +160,39 @@ expect "PostToolUseFailure → toolFailed(✗)" "$(fld TF toolFailed)" "true"
 expect "失败原因落库(tooltip 用)" "$(fld TF toolError)" "Command exited with non-zero status code 1"
 expect "工具失败不是终态,仍 working" "$(st TF)" "working"
 expect "工具失败仍阻止休眠" ".blocking" "true"
-expect "工具失败不触发红点(非任务级 failed)" ".hasUnseenFailed" "false"
+expect "工具失败不触发失败红(非任务级 failed)" ".hasFailed" "false"
 hook '{"hook_event_name":"PostToolUse","session_id":"TF","tool_name":"Edit","tool_input":{"file_path":"a.go"}}'
 expect "下个动作成功 → 清 ✗" "$(fld TF toolFailed)" "false"
 expect "下个动作成功 → 打 ✓" "$(fld TF toolComplete)" "true"
 
-group "需求2:Stop → done(不删,绿点)+ seen 生命周期"
+group "需求2:Stop → done(不删,绿闪电)+ seen 生命周期"
 reset
 hook '{"hook_event_name":"UserPromptSubmit","session_id":"D","cwd":"/proj","prompt":"重构 auth"}'
 hook '{"hook_event_name":"Stop","session_id":"D","last_assistant_message":"已完成,改了 3 个文件。"}'
 expect "Stop → done(item 留存)" "$(st D)" "done"
 expect "done 放行休眠" ".blocking" "false"
-expect "未看完成 → 绿点" ".hasUnseenDone" "true"
+expect "未看顶层完成 → 绿闪电(hasUnseenDone)" ".hasUnseenDone" "true"
 expect "最终回复落库" "$(fld D reply)" "已完成,改了 3 个文件。"
 openpop   # 模拟打开 popover
-expect "打开 popover → 标 seen(清绿点)" ".hasUnseenDone" "false"
+expect "打开 popover → 标 seen(闪电回落白/灰)" ".hasUnseenDone" "false"
 expect "本次打开仍能看到 done" "$(has D)" "true"
 closepop  # 模拟关闭
 expect "关闭后清理 → 下次打开消失" "$(has D)" "false"
 
-group "需求3:StopFailure → failed(红点 + 原因/细节)"
+group "需求3:StopFailure → failed(红闪电 + 原因/细节)"
 reset
 hook '{"hook_event_name":"StopFailure","session_id":"E","error":"rate_limit","last_assistant_message":"API Error: Rate limit reached"}'
 expect "StopFailure 直接新建 failed" "$(st E)" "failed"
-expect "未看失败 → 红点" ".hasUnseenFailed" "true"
+expect "存在 failed → 红闪电" ".hasFailed" "true"
 expect "failed 放行休眠" ".blocking" "false"
 expect "失败类型" "$(fld E errorKind)" "rate_limit"
 expect "失败细节" "$(fld E errorDetail)" "API Error: Rate limit reached"
+openpop
+expect "打开 popover 后 failed 仍保持红闪电" ".hasFailed" "true"
 hook '{"hook_event_name":"Stop","session_id":"E","last_assistant_message":"x"}'
 expect "失败优先:done 不覆盖 failed" "$(st E)" "failed"
+closepop
+expect "关闭 popover 清理 failed → 红闪电消失" ".hasFailed" "false"
 
 group "需求5:MessageDisplay 流式回复(replace/append)"
 reset
@@ -219,10 +223,10 @@ expect "子任务工具刷新" "$(fld 'P#a1' activity)" "Grep: foo"
 hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a1","last_assistant_message":"找到 3 处"}'
 expect "SubagentStop → 子任务 done" "$(st 'P#a1')" "done"
 expect "父任务仍 working" "$(st P)" "working"
-expect "子任务完成静默:不点亮菜单栏绿点(父仍 working)" ".hasUnseenDone" "false"
+expect "子任务完成静默:不点亮菜单栏绿闪电(父仍 working)" ".hasUnseenDone" "false"
 hook '{"hook_event_name":"Stop","session_id":"P","last_assistant_message":"全部完成"}'
 expect "父 Stop → done" "$(st P)" "done"
-expect "父任务完成 → 点亮菜单栏绿点(子任务不算)" ".hasUnseenDone" "true"
+expect "父任务完成 → 点亮菜单栏绿闪电(子任务不算)" ".hasUnseenDone" "true"
 expect "全终态 → 放行休眠" ".blocking" "false"
 
 group "子任务:已完成列表封顶(maxDoneSubtaskCount=20)超出按 endedAt 删最旧"
@@ -237,7 +241,7 @@ expect "已完成子任务列表封顶 20" "[.sessions[]|select(.parentId==\"P2\
 expect "最旧的已完成子任务被移除(a0)" "$(has 'P2#a0')" "false"
 expect "次旧的已完成子任务被移除(a1)" "$(has 'P2#a1')" "false"
 expect "较新的已完成子任务保留(a21)" "$(has 'P2#a21')" "true"
-expect "封顶淘汰仍不点亮绿点(子任务完成静默)" ".hasUnseenDone" "false"
+expect "封顶淘汰仍不点亮绿闪电(子任务完成静默)" ".hasUnseenDone" "false"
 
 group "需求8:后台进程(Stop.background_tasks)— turn 已结束但后台仍在跑 → 不漏挡休眠"
 reset

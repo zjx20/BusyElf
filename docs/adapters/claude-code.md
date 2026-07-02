@@ -27,7 +27,7 @@
 
 **为什么是这套**:
 - 一个长 autonomous loop 通常是"一次 `UserPromptSubmit` → 几小时自主工具调用 → 最后一个 `Stop`"——整段就一个 turn,`working` 从头到尾。`PostToolUse`/`MessageDisplay` 让 popover 实时显示"当前在干什么 / 当前回复"。
-- `Stop` 只在 turn **正常结束**时触发 → `done`(任务转"已完成",留存绿点提示,看一次后清理,**不再直接消失**)。turn 因 API 错误结束则走 `StopFailure` → `fail`(红点紧急提示)。
+- `Stop` 只在 turn **正常结束**时触发 → `done`(任务转"已完成",留存绿色提示,看一次后清理,**不再直接消失**)。turn 因 API 错误结束则走 `StopFailure` → `fail`(红色紧急提示,清理前持续)。
 - **中途接管**:BusyElf 若在 agent 干活中途启动会错过 `UserPromptSubmit`;`update`/`wait`/`fail` 都 upsert 创建,所以下一条 `PostToolUse`/`Notification`/`StopFailure` 就能把任务接上,不依赖 start。
 
 **读 `notification_type` 区分 permission vs idle**(原先靠时序区分;现因终态留存、`wait` 改为总是创建,时序不再可靠,故显式读字段——官方已稳定提供):
@@ -160,7 +160,7 @@ URL 里的端口写死成默认 `17872`。**端口是"黏住(sticky)"的**:BusyE
 
 1. 启动 BusyElf。
 2. `pmset -g assertions` 应在有 `working` 任务时看到一条 `PreventUserIdleSystemSleep`(name 含 "BusyElf"),任务转终态/清空后消失。
-3. 跑一个真实 Claude 会话:提交 prompt → 菜单栏计数 +1 且断言出现;turn 结束 → 任务转"已完成"(绿点)、断言消失;若 API 报错异常停止 → "失败"(红点)。
+3. 跑一个真实 Claude 会话:提交 prompt → 菜单栏计数 +1 且断言出现;turn 结束 → 任务转"已完成"(绿色提示)、断言消失;若 API 报错异常停止 → "失败"(红色提示)。
 
 不想跑真实会话也可直接打端点(模拟方式 A):
 
@@ -168,7 +168,7 @@ URL 里的端口写死成默认 `17872`。**端口是"黏住(sticky)"的**:BusyE
 curl -sS -m2 -X POST http://127.0.0.1:17872/claude/hooks \
   -d '{"hook_event_name":"UserPromptSubmit","session_id":"t1","cwd":"'"$PWD"'","prompt":"hello"}'   # → working
 curl -sS -m2 -X POST http://127.0.0.1:17872/claude/hooks \
-  -d '{"hook_event_name":"Stop","session_id":"t1","last_assistant_message":"done"}'                  # → 已完成(绿点)
+  -d '{"hook_event_name":"Stop","session_id":"t1","last_assistant_message":"done"}'                  # → 已完成(绿色提示)
 curl -sS -m2 -X POST http://127.0.0.1:17872/claude/hooks \
-  -d '{"hook_event_name":"StopFailure","session_id":"t2","error":"rate_limit"}'                      # → 失败(红点)
+  -d '{"hook_event_name":"StopFailure","session_id":"t2","error":"rate_limit"}'                      # → 失败(红色提示)
 ```

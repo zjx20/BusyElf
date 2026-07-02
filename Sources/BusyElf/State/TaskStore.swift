@@ -12,7 +12,7 @@ import Foundation
 /// 整数会漂移成负数或卡正从而永久阻止休眠——本应用绝不能有的 bug。
 ///
 /// 终态(done/failed)留在字典里展示,靠 seen 生命周期清理:
-/// popover 打开 → `markTerminalSeen`(清角标),关闭 → `purgeSeenTerminal`(下次打开就消失)。
+/// popover 打开 → `markTerminalSeen`(完成绿回落;失败红继续保持),关闭 → `purgeSeenTerminal`(下次打开就消失)。
 final class TaskStore {
     static let shared = TaskStore()
 
@@ -22,9 +22,9 @@ final class TaskStore {
     /// 终态项的兜底清理(防止用户从不打开 popover 导致字典无界增长)。
     private static let maxTerminalAge: TimeInterval = 30 * 60   // 超龄终态项移除
     private static let maxTerminalCount = 50                    // 终态项数硬上限
-    /// 已完成子任务数硬上限:子任务完成静默(不点亮绿点),仅作参考,超出即按 endedAt 删最旧,
+    /// 已完成子任务数硬上限:子任务完成静默(不染绿),仅作参考,超出即按 endedAt 删最旧,
     /// 防某个多子代理的父(如 workflow)完成后堆一长串已完成子项。只淘汰 done 子任务:
-    /// failed 子任务另有红点/seen 生命周期,不在此静默删除以免漏看失败。
+    /// failed 子任务另有失败红/seen 生命周期,不在此静默删除以免漏看失败。
     private static let maxDoneSubtaskCount = 20
     private static let orphanGraceSeconds: TimeInterval = 300   // 孤儿子任务降级阈值
 
@@ -120,7 +120,7 @@ final class TaskStore {
         }
     }
 
-    /// done:working/waiting → done(不删)。记 endedAt、seen=false(供绿点提示)。failed 不被 done 覆盖。
+    /// done:working/waiting → done(不删)。记 endedAt、seen=false(供完成绿提示)。failed 不被 done 覆盖。
     /// `∅` 时忽略(无前置任务不凭空造完成项)。
     func done(id: String, reply: String?) {
         queue.async {
@@ -290,16 +290,17 @@ final class TaskStore {
             // blocking = 派生的"仍在阻止休眠的 working"(疑似已断的不算);assertionHeld = 实际持有的电源断言。
             // 二者稳态应一致;看门狗 fire 后 setBlocked(false) 才会让 assertionHeld 翻 false(故 E2E 用它验证 timer)。
             let hasWorking = Self.hasBlockingWorking(Array(self.sessions.values), asOf: now, timeout: timeout)
-            // 与菜单栏绿点判据一致:子任务完成静默,只顶层任务未看完成才算(见 AppDelegate.refreshStatus)。
+            // 与菜单栏完成绿判据一致:子任务完成静默,只顶层任务未看完成才算(见 AppDelegate.refreshStatus)。
             let hasUnseenDone = self.sessions.values.contains { $0.status == .done && !$0.seen && !$0.isSubtask }
-            let hasUnseenFailed = self.sessions.values.contains { $0.status == .failed && !$0.seen }
+            // 失败红不是一次性未读提示:只要 failed 项仍在列表中,菜单栏/debug 就持续报红。
+            let hasFailed = self.sessions.values.contains { $0.status == .failed }
             let root: [String: Any] = [
                 "blocking": hasWorking,
                 "hasWorking": hasWorking,
                 "assertionHeld": SleepGuard.shared.isBlocking,
                 "inactivityTimeout": timeout,
                 "hasUnseenDone": hasUnseenDone,
-                "hasUnseenFailed": hasUnseenFailed,
+                "hasFailed": hasFailed,
                 "count": sorted.count,
                 "sessions": sorted.map { Self.debugDict($0, now: now, timeout: timeout) },
             ]
@@ -473,7 +474,7 @@ final class TaskStore {
         }
 
         // 已完成子任务数硬上限:子任务完成静默,列表只保留最近若干条,超出按 endedAt 删最旧。
-        // (子任务是叶子、不会是受保护的父;此处淘汰只影响 done 子任务,failed 子任务另有 seen 生命周期。)
+        // (子任务是叶子、不会是受保护的父;此处淘汰只影响 done 子任务,failed 子任务另有失败红/seen 生命周期。)
         let doneSubtasks = sessions.values.filter { $0.status == .done && $0.isSubtask }
         if doneSubtasks.count > Self.maxDoneSubtaskCount {
             let overflow = doneSubtasks

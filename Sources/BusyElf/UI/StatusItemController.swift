@@ -1,33 +1,36 @@
 import AppKit
 
-/// 菜单栏角标聚合:服务不可达(端口冲突)→ 红(最高优先);否则有未看失败 → 红;
-/// 否则有未看(顶层)完成 → 绿点;否则无。红态把**整只闪电**染红(更显眼)**并**保留右上角小红点;
-/// 绿态同理:**无任何活动任务时**把整只闪电染绿 + 保留右上角小绿点(与红态统一 UX;仍在干活/等待时
-/// 只保留角标绿点、不染绿闪电,避免"看着像全好了"误导休眠判断)。服务不可达另压暗整体透明度以区别于"任务失败"。
-/// 注:`hasUnseenDone` 只统计**顶层任务**——子任务完成静默(不点亮菜单栏绿点),由 AppDelegate 计算时排除。
+/// 终态/异常信号聚合(喂给 `StatusItemController.decideVisual`)。
+/// 注:`hasUnseenDone` 只统计**顶层任务**——子任务完成静默(不点亮菜单栏),由 AppDelegate 计算时排除。
 struct StatusBadge {
-    var hasUnseenFailed: Bool = false
+    /// 只要仍保留 failed 项就为 true;失败不是一次性未读提示,看过后也持续染红直到被清理/移除。
+    var hasFailed: Bool = false
     var hasUnseenDone: Bool = false
     /// 服务彻底不可达(端口被占用/绑定失败):应大声可见,提示用户去解决。
     var serverUnreachable: Bool = false
-    /// 角标/着色颜色:不可达红 > 失败红 > 完成绿。红→整只闪电染红 + 右上角小红点;绿→(无活动时)整只闪电染绿 + 右上角小绿点。
-    var dotColor: NSColor? {
-        if serverUnreachable { return .systemRed }
-        if hasUnseenFailed { return .systemRed }
-        if hasUnseenDone { return .systemGreen }
-        return nil
-    }
 }
 
-/// 维护菜单栏图标外观。单一 `bolt.fill`,只靠明暗 / 数字 / 着色 / 角标变化传达状态,
-/// 绝不替换字形(换字形会改宽度、让菜单栏抖动)。
+/// 闪电的五种颜色档。`neutral` = template 图(随菜单栏明暗自动黑/白):满亮=有任务在跑(白),压暗=完全空闲(灰)。
+enum BoltColor { case red, orange, green, neutral }
+
+/// 一次渲染的完整决定(纯数据,便于白盒单测,不碰 AppKit)。
+struct BoltVisual: Equatable {
+    var color: BoltColor
+    var alpha: CGFloat       // 空闲灰 0.45 / 不可达红 0.6 / 其余 1.0
+    var showNumber: Bool     // 是否显示活动任务数(working+waiting)
+}
+
+/// 维护菜单栏图标外观。单一 `bolt.fill`,**只靠整只闪电的颜色 + 明暗 + 数字**传达状态,
+/// 绝不替换字形(换字形会改宽度、让菜单栏抖动),也**不再叠加右上角小圆点**
+/// (闪电本身的颜色即状态,圆点冗余;去掉更干净)。
 ///
-/// 着色策略(优先级:红 > 橙 > 常规):
-/// - 失败/不可达:换成 **palette 着红**的非 template 图 + 红色数字(整只闪电染红,最响)。
-/// - 有 waiting:换成 **palette 着橙**的非 template 图 + 橙色数字。
-/// - 无活动任务但有未看完成:换成 **palette 着绿**的非 template 图(整只闪电染绿,与失败红统一 UX)。
-/// - 否则:用 **template** 图(`isTemplate=true`),由系统按菜单栏明暗自动渲染成黑/白。
-/// - 有未看终态:在底图右上角合成一个小角标(红=失败/不可达,绿=完成),`isTemplate=false`。
+/// 着色档(优先级 高→低,见 `decideVisual`):
+/// - **红**:服务不可达(半透明区分)或有失败任务 —— palette 着红非 template 图 + 红色数字(最响)。
+/// - **橙**:有 waiting —— palette 着橙非 template 图 + 橙色数字。
+/// - **绿**:有未看**顶层**完成 **且无任何 working 任务** —— palette 着绿非 template 图(与失败红统一 UX;
+///   仍有任务在跑时不染绿,避免"看着像全好了"误导休眠)。
+/// - **白**:有 working 任务 —— template 图满亮(系统按菜单栏明暗渲染黑/白)+ 默认色数字。
+/// - **灰**:完全空闲 —— template 图半透明(0.45)、无数字。
 final class StatusItemController {
     private let statusItem: NSStatusItem
     private let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
@@ -82,50 +85,24 @@ final class StatusItemController {
     /// 由 AppDelegate 在 TaskStore.onChange 时调用。
     /// - workingCount: 在干活的任务数(决定是否阻止休眠 / 菜单栏数字)。
     /// - waitingCount: 等用户的任务数(决定是否着关注橙 / 数字)。
-    /// - badge: 终态角标(红=有未看失败,绿=有未看完成)。
+    /// - badge: 终态/异常信号(红=有失败,绿=有未看完成)。
     func refresh(workingCount: Int, waitingCount: Int, badge: StatusBadge = StatusBadge()) {
         guard let button = statusItem.button else { return }
         let total = workingCount + waitingCount
-        let hasWaiting = waitingCount > 0
-        let dotColor = badge.dotColor
+        let v = Self.decideVisual(workingCount: workingCount, waitingCount: waitingCount, badge: badge)
 
-        // 空闲:无活动任务且无角标 → 半透明、无数字、template(随明暗自适配)。
-        if total == 0 && dotColor == nil {
-            button.image = templateBolt
-            button.contentTintColor = nil
-            button.title = ""
-            button.alphaValue = 0.45
-            button.toolTip = L.Tip.idle
-            return
-        }
-
-        // 服务不可达时压暗整体(红闪电 + 半透明),与"任务失败红闪电(满亮)"区别开。
-        button.alphaValue = badge.serverUnreachable ? 0.6 : 1.0
         button.contentTintColor = nil
-        button.toolTip = Self.tooltip(working: workingCount, waiting: waitingCount, badge: badge)
+        button.alphaValue = v.alpha
+        button.image = boltImage(for: v.color)
+        // 灰(空闲)= neutral 且无数字;其余走带活动数的 tooltip。
+        let isIdle = v.color == .neutral && !v.showNumber
+        button.toolTip = isIdle ? L.Tip.idle
+            : Self.tooltip(working: workingCount, waiting: waitingCount, badge: badge)
 
-        // 底图着色优先级:失败/不可达红(整只染红,最响)> 等待橙 > 完成绿 > 常规 template。
-        // 完成绿只在**无任何活动任务**(total==0)时整只染绿:仍在干活/等待时染绿会"看着像全好了"、
-        // 误导休眠判断,故此时只保留右上角绿点,底图仍随忙碌态(template/橙)。
-        let isRed = dotColor == NSColor.systemRed
-        let useOrange = !isRed && hasWaiting
-        let useGreen = !isRed && total == 0 && dotColor == NSColor.systemGreen
-        let base = isRed ? redBolt : (useOrange ? orangeBolt : (useGreen ? greenBolt : templateBolt))
-        // 有未看终态:右上角合成小角标(红=失败/不可达,绿=完成),与整只着色统一呈现。
-        // 角标自带反差细环,红/绿点压在同色闪电上仍清晰可辨。
-        if let dotColor {
-            button.image = badgedBolt(base: base, templateBase: !useOrange && !isRed && !useGreen,
-                                      dot: dotColor, appearance: button.effectiveAppearance)
-        } else {
-            button.image = base
-        }
-
-        // 数字 = 活动任务数;只有终态项(total==0,但有角标)时不显示数字。
-        if total == 0 {
-            button.title = ""
-        } else {
+        // 数字 = 活动任务数(working+waiting);颜色随档:红/橙同色,白/灰默认。
+        if v.showNumber {
             let display = total > 9 ? "9+" : "\(total)"
-            let tint: NSColor? = isRed ? .systemRed : (hasWaiting ? .systemOrange : nil)
+            let tint: NSColor? = v.color == .red ? .systemRed : (v.color == .orange ? .systemOrange : nil)
             if let tint {
                 button.attributedTitle = NSAttributedString(
                     string: display,
@@ -133,35 +110,40 @@ final class StatusItemController {
             } else {
                 button.title = display
             }
+        } else {
+            button.title = ""
         }
     }
 
-    /// 在底图右上角合成一个小角标(带一圈背景色细环,防止压在 bolt 上糊掉)。
-    /// template 底图按当前菜单栏明暗烤成黑/白(合成图 isTemplate=false,失去自动明暗,故每次按外观重画)。
-    private func badgedBolt(base: NSImage?, templateBase: Bool, dot: NSColor, appearance: NSAppearance) -> NSImage? {
-        guard let base else { return nil }
-        let pad: CGFloat = 3   // 右上角留给角标的余量
-        let size = NSSize(width: base.size.width + pad, height: base.size.height + pad)
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-
-        let img = NSImage(size: size, flipped: false) { _ in
-            let boltRect = NSRect(x: 0, y: 0, width: base.size.width, height: base.size.height)
-            base.draw(in: boltRect)
-            if templateBase {
-                // template 默认画成黑;用 sourceAtop 染成菜单栏文字色。
-                (isDark ? NSColor.white : NSColor.black).set()
-                boltRect.fill(using: .sourceAtop)
-            }
-            let d: CGFloat = 5
-            let dotRect = NSRect(x: size.width - d, y: size.height - d, width: d, height: d)
-            (isDark ? NSColor.black : NSColor.white).setFill()
-            NSBezierPath(ovalIn: dotRect.insetBy(dx: -1, dy: -1)).fill()
-            dot.setFill()
-            NSBezierPath(ovalIn: dotRect).fill()
-            return true
+    /// 纯决策:由任务计数 + 信号得出闪电的颜色/透明度/是否显示数字。无副作用、不碰 AppKit,便于白盒单测。
+    ///
+    /// 优先级(高→低,首个命中即返回):
+    ///  1. 服务不可达 → 红(半透明,与失败满亮红区分)。
+    ///  2. 有失败任务 → 红。
+    ///  3. 有 waiting → 橙。
+    ///  4. 有未看**顶层**完成 **且无任何 working** → 绿(仍有任务在跑时不染绿,避免误导休眠)。
+    ///  5. 有 working → 白(neutral 满亮)。
+    ///  6. 完全空闲 → 灰(neutral 半透明)。
+    static func decideVisual(workingCount: Int, waitingCount: Int, badge: StatusBadge) -> BoltVisual {
+        let total = workingCount + waitingCount
+        if badge.serverUnreachable { return BoltVisual(color: .red, alpha: 0.6, showNumber: total > 0) }
+        if badge.hasFailed         { return BoltVisual(color: .red, alpha: 1.0, showNumber: total > 0) }
+        if waitingCount > 0        { return BoltVisual(color: .orange, alpha: 1.0, showNumber: true) }
+        if badge.hasUnseenDone && workingCount == 0 {
+            return BoltVisual(color: .green, alpha: 1.0, showNumber: false)   // 顶层完成、全部跑完 → 整只绿
         }
-        img.isTemplate = false
-        return img
+        if workingCount > 0        { return BoltVisual(color: .neutral, alpha: 1.0, showNumber: true) }   // 运行白
+        return BoltVisual(color: .neutral, alpha: 0.45, showNumber: false)                                // 空闲灰
+    }
+
+    /// 颜色档 → 具体底图(neutral 用 template,随菜单栏明暗自适配黑/白)。
+    private func boltImage(for color: BoltColor) -> NSImage? {
+        switch color {
+        case .red:     return redBolt
+        case .orange:  return orangeBolt
+        case .green:   return greenBolt
+        case .neutral: return templateBolt
+        }
     }
 
     private static func tooltip(working: Int, waiting: Int, badge: StatusBadge) -> String {
@@ -169,7 +151,7 @@ final class StatusItemController {
         var parts: [String] = []
         if working > 0 { parts.append(L.Tip.working(working)) }
         if waiting > 0 { parts.append(L.Tip.waiting(waiting)) }
-        if badge.hasUnseenFailed { parts.append(L.Tip.hasFailed) }
+        if badge.hasFailed { parts.append(L.Tip.hasFailed) }
         else if badge.hasUnseenDone { parts.append(L.Tip.hasDone) }
         if parts.isEmpty { return "BusyElf" }
         return "BusyElf · " + parts.joined(separator: " · ")

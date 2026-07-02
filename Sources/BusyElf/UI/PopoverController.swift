@@ -220,7 +220,7 @@ final class PopoverController: NSViewController {
         updateFooter()
         syncContentSize()
         // popover 可见期间出现/变为终态的项也即时标 seen(立刻清菜单栏角标),关闭时一并清理。
-        // 解决"开着 popover 眼看任务变 done,关闭后绿点还在、下次打开还显示一次"。
+        // 解决"开着 popover 眼看任务变 done,关闭后完成绿还在、下次打开还显示一次"。
         if isPopoverVisible { TaskStore.shared.markTerminalSeen() }
     }
 

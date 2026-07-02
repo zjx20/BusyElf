@@ -60,8 +60,8 @@
 
 | 事件 | 给你什么 |
 |---|---|
-| `UserPromptSubmit` / `Stop` / `SessionEnd` | **防休眠核心**:单个长 turn 全程保持 working;`Stop` 让任务变"已完成"(绿点提示,看一次后清理)而非直接消失 |
-| `StopFailure` | turn 因 API 错误异常停止 → **红点紧急提示**,展示失败原因(rate_limit 等)与细节 |
+| `UserPromptSubmit` / `Stop` / `SessionEnd` | **防休眠核心**:单个长 turn 全程保持 working;`Stop` 让任务变"已完成"(绿色提示,看一次后清理)而非直接消失 |
+| `StopFailure` | turn 因 API 错误异常停止 → **红色紧急提示**,展示失败原因(rate_limit 等)与细节;清理前持续 |
 | `PreToolUse` | popover **即时**显示"正在做的工具"(工具开始时,不等它做完) |
 | `PostToolUse` | 把该工具标为已完成(行内 ✓);并在权限等待结束后把任务从"等待"复活为"工作中" |
 | `PostToolUseFailure` | 把该工具标为失败(行内 ✗,hover 看失败原因);工具失败是常态、不代表任务中断,任务仍"工作中" |
