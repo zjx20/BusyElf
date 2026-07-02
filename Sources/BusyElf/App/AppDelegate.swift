@@ -128,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let waiting = sessions.filter { $0.status == .waiting }.count
         let badge = StatusBadge(
             hasUnseenFailed: sessions.contains { $0.status == .failed && !$0.seen },
-            hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen },
+            // 子任务完成静默:只有**顶层任务**完成才点亮菜单栏绿点(子任务完成不通知)。
+            hasUnseenDone:   sessions.contains { $0.status == .done && !$0.seen && !$0.isSubtask },
             serverUnreachable: !serverReachable)
         statusController.refresh(workingCount: working, waitingCount: waiting, badge: badge)
     }

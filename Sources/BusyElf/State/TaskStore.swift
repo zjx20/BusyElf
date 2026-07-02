@@ -22,6 +22,10 @@ final class TaskStore {
     /// 终态项的兜底清理(防止用户从不打开 popover 导致字典无界增长)。
     private static let maxTerminalAge: TimeInterval = 30 * 60   // 超龄终态项移除
     private static let maxTerminalCount = 50                    // 终态项数硬上限
+    /// 已完成子任务数硬上限:子任务完成静默(不点亮绿点),仅作参考,超出即按 endedAt 删最旧,
+    /// 防某个多子代理的父(如 workflow)完成后堆一长串已完成子项。只淘汰 done 子任务:
+    /// failed 子任务另有红点/seen 生命周期,不在此静默删除以免漏看失败。
+    private static let maxDoneSubtaskCount = 20
     private static let orphanGraceSeconds: TimeInterval = 300   // 孤儿子任务降级阈值
 
     /// 看门狗:working 任务无活动超过它就视为"可能已断",不再阻止休眠(由 AppConfig 启动时注入)。
@@ -286,7 +290,8 @@ final class TaskStore {
             // blocking = 派生的"仍在阻止休眠的 working"(疑似已断的不算);assertionHeld = 实际持有的电源断言。
             // 二者稳态应一致;看门狗 fire 后 setBlocked(false) 才会让 assertionHeld 翻 false(故 E2E 用它验证 timer)。
             let hasWorking = Self.hasBlockingWorking(Array(self.sessions.values), asOf: now, timeout: timeout)
-            let hasUnseenDone = self.sessions.values.contains { $0.status == .done && !$0.seen }
+            // 与菜单栏绿点判据一致:子任务完成静默,只顶层任务未看完成才算(见 AppDelegate.refreshStatus)。
+            let hasUnseenDone = self.sessions.values.contains { $0.status == .done && !$0.seen && !$0.isSubtask }
             let hasUnseenFailed = self.sessions.values.contains { $0.status == .failed && !$0.seen }
             let root: [String: Any] = [
                 "blocking": hasWorking,
@@ -464,6 +469,16 @@ final class TaskStore {
             let overflow = terminals
                 .sorted { ($0.endedAt ?? $0.startedAt) < ($1.endedAt ?? $1.startedAt) }
                 .prefix(terminals.count - Self.maxTerminalCount)
+            for s in overflow { sessions.removeValue(forKey: s.id) }
+        }
+
+        // 已完成子任务数硬上限:子任务完成静默,列表只保留最近若干条,超出按 endedAt 删最旧。
+        // (子任务是叶子、不会是受保护的父;此处淘汰只影响 done 子任务,failed 子任务另有 seen 生命周期。)
+        let doneSubtasks = sessions.values.filter { $0.status == .done && $0.isSubtask }
+        if doneSubtasks.count > Self.maxDoneSubtaskCount {
+            let overflow = doneSubtasks
+                .sorted { ($0.endedAt ?? $0.startedAt) < ($1.endedAt ?? $1.startedAt) }
+                .prefix(doneSubtasks.count - Self.maxDoneSubtaskCount)
             for s in overflow { sessions.removeValue(forKey: s.id) }
         }
     }

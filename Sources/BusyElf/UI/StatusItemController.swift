@@ -1,14 +1,16 @@
 import AppKit
 
 /// 菜单栏角标聚合:服务不可达(端口冲突)→ 红(最高优先);否则有未看失败 → 红;
-/// 否则有未看完成 → 绿点;否则无。红态把**整只闪电**染红(更显眼)**并**保留右上角小红点;
-/// 绿态仅小绿点。服务不可达另压暗整体透明度以区别于"任务失败"。
+/// 否则有未看(顶层)完成 → 绿点;否则无。红态把**整只闪电**染红(更显眼)**并**保留右上角小红点;
+/// 绿态同理:**无任何活动任务时**把整只闪电染绿 + 保留右上角小绿点(与红态统一 UX;仍在干活/等待时
+/// 只保留角标绿点、不染绿闪电,避免"看着像全好了"误导休眠判断)。服务不可达另压暗整体透明度以区别于"任务失败"。
+/// 注:`hasUnseenDone` 只统计**顶层任务**——子任务完成静默(不点亮菜单栏绿点),由 AppDelegate 计算时排除。
 struct StatusBadge {
     var hasUnseenFailed: Bool = false
     var hasUnseenDone: Bool = false
     /// 服务彻底不可达(端口被占用/绑定失败):应大声可见,提示用户去解决。
     var serverUnreachable: Bool = false
-    /// 角标/着色颜色:不可达红 > 失败红 > 完成绿。红→整只闪电染红 + 右上角小红点;绿→仅右上角小绿点。
+    /// 角标/着色颜色:不可达红 > 失败红 > 完成绿。红→整只闪电染红 + 右上角小红点;绿→(无活动时)整只闪电染绿 + 右上角小绿点。
     var dotColor: NSColor? {
         if serverUnreachable { return .systemRed }
         if hasUnseenFailed { return .systemRed }
@@ -23,6 +25,7 @@ struct StatusBadge {
 /// 着色策略(优先级:红 > 橙 > 常规):
 /// - 失败/不可达:换成 **palette 着红**的非 template 图 + 红色数字(整只闪电染红,最响)。
 /// - 有 waiting:换成 **palette 着橙**的非 template 图 + 橙色数字。
+/// - 无活动任务但有未看完成:换成 **palette 着绿**的非 template 图(整只闪电染绿,与失败红统一 UX)。
 /// - 否则:用 **template** 图(`isTemplate=true`),由系统按菜单栏明暗自动渲染成黑/白。
 /// - 有未看终态:在底图右上角合成一个小角标(红=失败/不可达,绿=完成),`isTemplate=false`。
 final class StatusItemController {
@@ -49,6 +52,15 @@ final class StatusItemController {
         let base = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "BusyElf")
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
             .applying(.init(paletteColors: [.systemRed]))
+        let img = base?.withSymbolConfiguration(cfg)
+        img?.isTemplate = false   // 颜色已烤进图,不让系统当模板重染
+        return img
+    }()
+
+    private lazy var greenBolt: NSImage? = {
+        let base = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "BusyElf")
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+            .applying(.init(paletteColors: [.systemGreen]))
         let img = base?.withSymbolConfiguration(cfg)
         img?.isTemplate = false   // 颜色已烤进图,不让系统当模板重染
         return img
@@ -92,14 +104,17 @@ final class StatusItemController {
         button.contentTintColor = nil
         button.toolTip = Self.tooltip(working: workingCount, waiting: waitingCount, badge: badge)
 
-        // 底图着色优先级:失败/不可达红(整只染红,最响)> 等待橙 > 常规 template。
+        // 底图着色优先级:失败/不可达红(整只染红,最响)> 等待橙 > 完成绿 > 常规 template。
+        // 完成绿只在**无任何活动任务**(total==0)时整只染绿:仍在干活/等待时染绿会"看着像全好了"、
+        // 误导休眠判断,故此时只保留右上角绿点,底图仍随忙碌态(template/橙)。
         let isRed = dotColor == NSColor.systemRed
         let useOrange = !isRed && hasWaiting
-        let base = isRed ? redBolt : (useOrange ? orangeBolt : templateBolt)
+        let useGreen = !isRed && total == 0 && dotColor == NSColor.systemGreen
+        let base = isRed ? redBolt : (useOrange ? orangeBolt : (useGreen ? greenBolt : templateBolt))
         // 有未看终态:右上角合成小角标(红=失败/不可达,绿=完成),与整只着色统一呈现。
-        // 角标自带反差细环,红点压在红闪电上仍清晰可辨。
+        // 角标自带反差细环,红/绿点压在同色闪电上仍清晰可辨。
         if let dotColor {
-            button.image = badgedBolt(base: base, templateBase: !useOrange && !isRed,
+            button.image = badgedBolt(base: base, templateBase: !useOrange && !isRed && !useGreen,
                                       dot: dotColor, appearance: button.effectiveAppearance)
         } else {
             button.image = base

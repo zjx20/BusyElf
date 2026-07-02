@@ -55,11 +55,13 @@ TaskStore  [id: TaskSession]  串行队列, 幂等 upsert/标记         State/T
 | `start`  | upsert→working;记 prompt / 子任务标签(name)/ parentId;新 turn 清旧回复 |
 | `update` | upsert→working,**复活终态/waiting**;刷新当前动作(tool 优先,退化 reply)与回复(`reply`+`replyAppend` replace/append) |
 | `wait`   | upsert→waiting(总是创建);放行休眠 + 点亮"需要关注" |
-| `done`   | 已存在→done(终态,不删,留绿点提示);failed 不被覆盖 |
+| `done`   | 已存在→done(终态,不删;**顶层**留绿点提示,子任务完成静默);failed 不被覆盖 |
 | `fail`   | upsert→failed(失败优先;红点);记 errorKind/errorDetail |
 | `remove` | 真正移除(级联子任务) |
 
 `status ∈ {working, waiting, done, failed}`。`working` 阻止休眠;`waiting/done/failed` 放行。终态留存展示,靠 **seen 生命周期**清理:打开 popover→`markTerminalSeen`(清角标),关闭→`purgeSeenTerminal`(下次打开消失);另有 TTL/数量上限兜底(`pruneLocked`)。
+
+**菜单栏完成提示(绿点/绿闪电)只由顶层任务点亮**:`hasUnseenDone` 计算时排除子任务(`!isSubtask`,见 `AppDelegate.refreshStatus` 与 `debugStateJSON`,两处判据须一致)——子任务(subagent/后台子项)完成**静默**,不通知、不亮绿点(它们是父任务内部步骤、数量多)。与失败"整只闪电烤红"统一 UX:未看顶层 done **且无任何活动任务时**整只闪电烤绿 + 右上角绿点;仍在 working/waiting 时只保留绿点、底图随忙碌态(避免"看着像全好了"误导休眠)。失败红优先级最高、任何时候整只烤红。见 `UI/StatusItemController.swift`。**已完成子任务列表封顶**(`maxDoneSubtaskCount=20`,`pruneLocked`):done 子任务超上限按 `endedAt` 删最旧,防多子代理的父完成后堆积;failed 子任务不在此静默删。
 
 **看门狗(派生 stalled,不加第 5 个状态)**:`working` 任务 `now − lastSeen > inactivityTimeout`(默认 15min,可配)→ 派生为"疑似已断",`hasBlockingWorking` 把它排除 → **放行休眠**。状态仍是 `working`(不谎报 done/failed、不弹横幅),UI 标灰 + "可能已断";任一动词刷新 `lastSeen` 即自动恢复阻塞。靠 `reconcile` 里一次性 timer 精确到截止点重算;超久(默认 6h)仍无活动则在 `pruneLocked` 兜底移除。
 

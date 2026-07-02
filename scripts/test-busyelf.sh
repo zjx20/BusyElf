@@ -219,9 +219,25 @@ expect "子任务工具刷新" "$(fld 'P#a1' activity)" "Grep: foo"
 hook '{"hook_event_name":"SubagentStop","session_id":"P","agent_id":"a1","last_assistant_message":"找到 3 处"}'
 expect "SubagentStop → 子任务 done" "$(st 'P#a1')" "done"
 expect "父任务仍 working" "$(st P)" "working"
+expect "子任务完成静默:不点亮菜单栏绿点(父仍 working)" ".hasUnseenDone" "false"
 hook '{"hook_event_name":"Stop","session_id":"P","last_assistant_message":"全部完成"}'
 expect "父 Stop → done" "$(st P)" "done"
+expect "父任务完成 → 点亮菜单栏绿点(子任务不算)" ".hasUnseenDone" "true"
 expect "全终态 → 放行休眠" ".blocking" "false"
+
+group "子任务:已完成列表封顶(maxDoneSubtaskCount=20)超出按 endedAt 删最旧"
+reset
+hook '{"hook_event_name":"UserPromptSubmit","session_id":"P2","cwd":"/proj","prompt":"多子代理主任务"}'
+# 起 22 个子代理并全部完成(> 上限 20),父保持 working 不被淘汰
+for i in $(seq 0 21); do
+  hook "{\"hook_event_name\":\"SubagentStart\",\"session_id\":\"P2\",\"agent_id\":\"a$i\",\"agent_type\":\"Explore\"}"
+  hook "{\"hook_event_name\":\"SubagentStop\",\"session_id\":\"P2\",\"agent_id\":\"a$i\",\"last_assistant_message\":\"ok\"}"
+done
+expect "已完成子任务列表封顶 20" "[.sessions[]|select(.parentId==\"P2\" and .status==\"done\")]|length" "20"
+expect "最旧的已完成子任务被移除(a0)" "$(has 'P2#a0')" "false"
+expect "次旧的已完成子任务被移除(a1)" "$(has 'P2#a1')" "false"
+expect "较新的已完成子任务保留(a21)" "$(has 'P2#a21')" "true"
+expect "封顶淘汰仍不点亮绿点(子任务完成静默)" ".hasUnseenDone" "false"
 
 group "需求8:后台进程(Stop.background_tasks)— turn 已结束但后台仍在跑 → 不漏挡休眠"
 reset

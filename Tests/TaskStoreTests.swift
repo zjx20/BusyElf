@@ -333,4 +333,22 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertNotNil(s("PW"))                             // 子 waiting(非终态)→ 父保留
         XCTAssertEqual(s("PW#a1")?.status, .waiting)
     }
+
+    // MARK: - 已完成子任务列表封顶(子任务完成静默,超上限按 endedAt 删最旧)
+
+    /// 已完成子任务超过硬上限(maxDoneSubtaskCount=20)→ 自动删最旧;父保持 working 不受影响。
+    func testDoneSubtasksCappedAtMax() {
+        start("CAP")                                         // 顶层父,保持 working
+        for i in 0..<22 {
+            let cid = "CAP#a\(i)"
+            start(cid, parentId: "CAP", name: "Explore")
+            store.done(id: cid, reply: nil)                 // 逐个完成,endedAt 单调递增
+        }
+        let subDone = store.snapshotSync().filter { $0.isSubtask && $0.status == .done }
+        XCTAssertEqual(subDone.count, 20)                   // 封顶 20
+        XCTAssertNil(s("CAP#a0"))                           // 最旧两个被淘汰
+        XCTAssertNil(s("CAP#a1"))
+        XCTAssertNotNil(s("CAP#a21"))                       // 最新的保留
+        XCTAssertEqual(s("CAP")?.status, .working)          // 父不受影响
+    }
 }
